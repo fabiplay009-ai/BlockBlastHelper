@@ -1,23 +1,43 @@
-name: Build APK
+name: APK bauen
+
 on:
   push:
   workflow_dispatch:
+
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: unzip -q BlockBlastHelper.zip
+
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: 17
+
       - uses: gradle/actions/setup-gradle@v4
         with:
-          gradle-version: 8.7
-      - run: gradle assembleDebug
-        working-directory: BlockBlastHelper
+          gradle-version: "8.7"
+
+      - name: APK bauen
+        run: gradle assembleDebug --no-daemon
+
+      - name: APK umbenennen
+        run: cp app/build/outputs/apk/debug/app-debug.apk BlockBlastHelper.apk
+
       - uses: actions/upload-artifact@v4
         with:
-          name: BlockBlastHelper-APK
-          path: BlockBlastHelper/app/build/outputs/apk/debug/app-debug.apk
+          name: BlockBlastHelper-apk
+          path: BlockBlastHelper.apk
+
+      - name: Als Release veröffentlichen
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: BlockBlastHelper (neueste Version)
+          prerelease: false
+          make_latest: true
+          files: BlockBlastHelper.apk
