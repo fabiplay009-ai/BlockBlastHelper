@@ -4,6 +4,7 @@ import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.Service
+import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
@@ -15,6 +16,7 @@ import android.media.projection.MediaProjectionManager
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.provider.MediaStore
 import android.view.Gravity
 import android.view.View
 import android.view.WindowManager
@@ -66,6 +68,7 @@ class HelperService : Service() {
     private var analyzedCount = 0
     private var lastKey = ""
     private var stable = 0
+    private var saveNext = false   // nächsten Scan als Bild speichern (nach Tippen auf "Zug")
 
     private val EMPTY = 0
     private val FULL = 1
@@ -130,7 +133,7 @@ class HelperService : Service() {
         btn = TextView(this).apply {
             text = "↻ Zug"; setTextColor(Color.WHITE); setPadding(32, 20, 32, 20)
             setBackgroundColor(0xCC2D3280.toInt())
-            setOnClickListener { analyzedKey = null; analyzedCount = 0; stable = STABLE_NEW }  // Zug sofort neu berechnen
+            setOnClickListener { analyzedKey = null; analyzedCount = 0; stable = STABLE_NEW; saveNext = true }  // neu berechnen + Scan speichern
             setOnLongClickListener { stopSelf(); true }  // lange drücken = beenden
         }
         wm.addView(btn, lp(-2, -2, 8).apply { gravity = Gravity.TOP or Gravity.START; y = 300 })
@@ -302,9 +305,10 @@ class HelperService : Service() {
             res = Solver.solve(BooleanArray(64) { cells[it] != EMPTY }, pieces)
         ov.items.clear()
         val m = res?.moves?.firstOrNull()
+        var problem: String? = null
         when {
-            res == null -> toast("Keine Teile erkannt")
-            m == null || !fits(cells, m) -> toast("Kein Teil passt sicher aufs Brett")
+            res == null -> problem = "Keine Teile erkannt"
+            m == null || !fits(cells, m) -> problem = "Kein Teil passt sicher aufs Brett"
             else -> {
                 ov.stroke = max(6f, cs * 0.08f)
                 val col = COL[m.piece]
@@ -316,10 +320,82 @@ class HelperService : Service() {
                 // Markierung unter dem Teil in der Ablage, das gesetzt werden soll
                 val sx = W * (2 * m.piece + 1) / 6f; val y1 = TY1 * H
                 ov.items.add(Item(RectF(sx - cs * .7f, y1 - 26, sx + cs * .7f, y1 - 12), col, false))
-                if (res.moves.size < pieces.count { it.isNotEmpty() }) toast("Achtung: nicht alle Teile passen")
+                if (res.moves.size < pieces.count { it.isNotEmpty() }) problem = "Achtung: nicht alle Teile passen"
             }
         }
         ov.invalidate()
+        if (problem != null) toast(problem)
+        if (problem != null || saveNext) {
+            saveNext = false
+            saveDebug(problem ?: "manuell", pieces, cells, m?.takeIf { fits(cells, it) })
+        }
+    }
+
+    // ---------- Fehlerbild ----------
+
+    /**
+     * Speichert das Bildschirmbild mit dem, was der Helfer gelesen hat, in der Galerie
+     * (Bilder/BlockHelfer): Punkt je Brettfeld (grün = leer, rot = belegt, gelb = unsicher),
+     * die erkannten Teile oben in der Ablage und den vorgeschlagenen Zug.
+     */
+    private fun saveDebug(reason: String, pieces: List<List<IntArray>>, cells: IntArray, m: Solver.Move?) {
+        if (!hasFrame || frs <= 0) return
+        val data = fb.copyOf(); val stride = frs; val w = W; val hh = H
+        val bx = BX * W; val by = BY * H; val cs = BS * W / 8
+        Thread {
+            try {
+                val raw = Bitmap.createBitmap(stride / 4, min(hh, data.size / stride), Bitmap.Config.ARGB_8888)
+                raw.copyPixelsFromBuffer(java.nio.ByteBuffer.wrap(data, 0, raw.byteCount))
+                val bmp = Bitmap.createBitmap(raw, 0, 0, min(w, raw.width), raw.height).copy(Bitmap.Config.ARGB_8888, true)
+                val cv = Canvas(bmp)
+                val p = Paint(Paint.ANTI_ALIAS_FLAG)
+                // Lesung des Bretts
+                for (i in 0 until 64) {
+                    p.style = Paint.Style.FILL
+                    p.color = when (cells[i]) { EMPTY -> Color.GREEN; FULL -> Color.RED; else -> Color.YELLOW }
+                    cv.drawCircle(bx + (i % 8 + .5f) * cs, by + (i / 8 + .5f) * cs, cs * .1f, p)
+                    p.style = Paint.Style.STROKE; p.strokeWidth = 2f; p.color = Color.BLACK
+                    cv.drawCircle(bx + (i % 8 + .5f) * cs, by + (i / 8 + .5f) * cs, cs * .1f, p)
+                }
+                // vorgeschlagener Zug
+                if (m != null) {
+                    p.style = Paint.Style.STROKE; p.strokeWidth = 6f; p.color = Color.WHITE
+                    for (x in m.cells) {
+                        val l = bx + (m.c + x[1]) * cs; val t = by + (m.r + x[0]) * cs
+                        cv.drawRect(l + 8, t + 8, l + cs - 8, t + cs - 8, p)
+                    }
+                }
+                // erkannte Teile, klein über der Ablage
+                val ms = cs * .22f; val ty = TY0 * hh - 5 * ms - 10
+                pieces.forEachIndexed { s, pc ->
+                    val sx = w * s / 3f + 20
+                    p.style = Paint.Style.STROKE; p.strokeWidth = 2f; p.color = Color.WHITE
+                    cv.drawRect(sx - 4, ty - 4, sx + 5 * ms + 4, ty + 5 * ms + 4, p)
+                    p.style = Paint.Style.FILL; p.color = COL[s] or 0xFF000000.toInt()
+                    for (x in pc) cv.drawRect(sx + x[1] * ms + 1, ty + x[0] * ms + 1, sx + (x[1] + 1) * ms - 1, ty + (x[0] + 1) * ms - 1, p)
+                }
+                // Grund + Rahmen von Brett und Ablage
+                p.style = Paint.Style.STROKE; p.strokeWidth = 3f; p.color = Color.MAGENTA
+                cv.drawRect(bx, by, bx + 8 * cs, by + 8 * cs, p)
+                cv.drawRect(0f, TY0 * hh, w.toFloat(), TY1 * hh, p)
+                p.style = Paint.Style.FILL; p.color = Color.WHITE; p.textSize = 40f
+                p.setShadowLayer(4f, 0f, 0f, Color.BLACK)
+                cv.drawText(reason, 30f, by - 20f, p)
+
+                val v = ContentValues().apply {
+                    put(MediaStore.Images.Media.DISPLAY_NAME, "blockhelfer_${System.currentTimeMillis()}.png")
+                    put(MediaStore.Images.Media.MIME_TYPE, "image/png")
+                    put(MediaStore.Images.Media.RELATIVE_PATH, "Pictures/BlockHelfer")
+                }
+                val uri = contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, v)
+                if (uri != null) {
+                    contentResolver.openOutputStream(uri)?.use { bmp.compress(Bitmap.CompressFormat.PNG, 100, it) }
+                    h.post { Toast.makeText(this, "Scan gespeichert (Galerie > BlockHelfer)", Toast.LENGTH_SHORT).show() }
+                }
+            } catch (e: Exception) {
+                h.post { toast("Scan konnte nicht gespeichert werden: ${e.message}") }
+            }
+        }.start()
     }
 
     override fun onDestroy() {
