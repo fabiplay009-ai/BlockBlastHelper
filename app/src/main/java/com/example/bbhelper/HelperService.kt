@@ -15,7 +15,6 @@ import android.media.projection.MediaProjectionManager
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
-import android.os.SystemClock
 import android.view.Gravity
 import android.view.View
 import android.view.WindowManager
@@ -36,6 +35,9 @@ class HelperService : Service() {
     private val TY1 = 0.90f   // Ablage der Teile: unten (x H)
     private val TS = 0.45f    // Feldgröße in der Ablage relativ zum Brettfeld
     private val MIND_BOARD = 70   // Brettfeld belegt, wenn Farbabstand zum leeren Feld größer ist
+    private val MIND_EMPTY = 35   // Brettfeld sicher leer, wenn Farbabstand kleiner ist (dazwischen = unsicher)
+    private val STABLE_NEW = 2    // so viele gleiche Bilder hintereinander, bevor neu gerechnet wird
+    private val STABLE_FEWER = 3  // ... wenn ein Teil fehlt (könnte gerade gezogen werden)
     private val MIND = 50         // Teil erkannt, wenn Farbabstand zum Ablage-Hintergrund größer ist
     private val NEED = 5          // Feld belegt, wenn mind. so viele von 9 Stichproben "Teil" sind
     private val POLL_MS = 350L    // so oft schaut der Helfer auf die Ablage
@@ -57,28 +59,35 @@ class HelperService : Service() {
 
     // Ablauf: neuer Satz in der Ablage -> kurz warten bis alles ruhig ist -> Zug berechnen und anzeigen
     private var running = true
-    private var waiting = false
-    private var needFresh = false
-    private var clearAt = 0L
-    private var analyzedSig: String? = null
-    private var sawFewer = false
-    private var lastSig = ""
-    private var lastBoardKey = ""
+    // Ablauf: Brett + Ablage werden ständig gescannt. Sobald sich etwas geändert hat und das Bild
+    // ruhig ist, wird mit dem echten Brett neu gerechnet und nur der nächste Zug angezeigt.
+    private var analyzedKey: String? = null
+    private var analyzedBoard = ""
+    private var analyzedCount = 0
+    private var lastKey = ""
     private var stable = 0
 
-    private class Item(val r: RectF, val color: Int, val txt: String?)
+    private val EMPTY = 0
+    private val FULL = 1
+    private val UNSURE = 2
 
+    private class Item(val r: RectF, val color: Int, val frame: Boolean)
+
+    // Hinweise werden nur als Rahmen gezeichnet: die Feldmitte bleibt frei, damit das Brett
+    // auch mit eingeblendetem Hinweis zuverlässig gescannt werden kann.
     private class Ov(c: Context) : View(c) {
         val items = ArrayList<Item>()
-        private val p = Paint(Paint.ANTI_ALIAS_FLAG).apply { textAlign = Paint.Align.CENTER; textSize = 44f }
+        var stroke = 10f
+        private val p = Paint(Paint.ANTI_ALIAS_FLAG)
         override fun onDraw(cv: Canvas) {
             for (i in items) {
-                p.style = Paint.Style.FILL
-                p.color = i.color
-                cv.drawRoundRect(i.r, 10f, 10f, p)
-                if (i.txt != null) {
-                    p.color = Color.WHITE
-                    cv.drawText(i.txt, i.r.centerX(), i.r.centerY() + 15f, p)
+                p.color = i.color or 0xFF000000.toInt()
+                if (i.frame) {
+                    p.style = Paint.Style.STROKE; p.strokeWidth = stroke
+                    cv.drawRoundRect(i.r, 12f, 12f, p)
+                } else {
+                    p.style = Paint.Style.FILL
+                    cv.drawRoundRect(i.r, 6f, 6f, p)
                 }
             }
         }
@@ -121,7 +130,7 @@ class HelperService : Service() {
         btn = TextView(this).apply {
             text = "↻ Zug"; setTextColor(Color.WHITE); setPadding(32, 20, 32, 20)
             setBackgroundColor(0xCC2D3280.toInt())
-            setOnClickListener { analyzedSig = null; sawFewer = false; startWaiting() }  // Zug neu berechnen
+            setOnClickListener { analyzedKey = null; analyzedCount = 0; stable = STABLE_NEW }  // Zug sofort neu berechnen
             setOnLongClickListener { stopSelf(); true }  // lange drücken = beenden
         }
         wm.addView(btn, lp(-2, -2, 8).apply { gravity = Gravity.TOP or Gravity.START; y = 300 })
@@ -159,22 +168,31 @@ class HelperService : Service() {
         return sqrt((dr * dr + dg * dg + db * db).toDouble())
     }
 
-    // Brett: Durchschnittsfarbe je Feld. Leer = Farbe des dunkelsten Feldes, alles andere = belegt.
-    private fun readBoard(): BooleanArray {
+    // Brett: je Feld 9 Stichproben aus der Feldmitte. Leer = Farbe der dunkelsten Felder.
+    // Ein Feld ist nur dann LEER bzw. BELEGT, wenn die klare Mehrheit der Stichproben das sagt,
+    // sonst UNSICHER (z. B. Animation, Effekt, halb verdeckt).
+    private fun readCells(): IntArray {
         val bx = BX * W; val by = BY * H; val cs = BS * W / 8
-        val avg = Array(64) { i ->
-            val sum = IntArray(3)
-            for (dy in -1..1) for (dx in -1..1) {
-                val px = rgb((bx + (i % 8 + .5f + dx * .25f) * cs).toInt(), (by + (i / 8 + .5f + dy * .25f) * cs).toInt())
-                for (k in 0..2) sum[k] += px[k]
+        val smp = Array(64) { i ->
+            Array(9) { k ->
+                val dx = k % 3 - 1; val dy = k / 3 - 1
+                rgb((bx + (i % 8 + .5f + dx * .2f) * cs).toInt(), (by + (i / 8 + .5f + dy * .2f) * cs).toInt())
             }
-            IntArray(3) { sum[it] / 9 }
         }
+        val avg = Array(64) { i -> IntArray(3) { k -> smp[i].sumOf { it[k] } / 9 } }
         val darkest = avg.minByOrNull { it[0] * 3 + it[1] * 6 + it[2] }!!
         val acc = IntArray(3); var cnt = 0
         for (a in avg) if (dist(a, darkest) < 40) { cnt++; for (k in 0..2) acc[k] += a[k] }
         val emptyCol = IntArray(3) { acc[it] / cnt }
-        return BooleanArray(64) { dist(avg[it], emptyCol) > MIND_BOARD }
+        return IntArray(64) { i ->
+            val full = smp[i].count { dist(it, emptyCol) > MIND_BOARD }
+            val empty = smp[i].count { dist(it, emptyCol) < MIND_EMPTY }
+            when {
+                full >= 7 -> FULL
+                empty >= 7 -> EMPTY
+                else -> UNSURE
+            }
+        }
     }
 
     private fun connected(cells: List<IntArray>): Boolean {
@@ -245,58 +263,61 @@ class HelperService : Service() {
 
     // ---------- Ablauf ----------
 
-    private fun startWaiting() {
-        waiting = true; stable = 0; lastSig = ""; lastBoardKey = ""
-        if (ov.items.isNotEmpty()) {
-            // Anzeige weg, damit das Brett ohne Überlagerung gelesen wird
-            needFresh = true; clearAt = SystemClock.uptimeMillis()
-            ov.items.clear(); ov.invalidate()
-        }
-    }
-
     private fun tick() {
-        val got = grab()
+        grab()
         if (!hasFrame) return
-        if (needFresh) {
-            val age = SystemClock.uptimeMillis() - clearAt
-            if (age < 300) return
-            if (!got && age < 1500) return
-            needFresh = false
-        }
         val tray = readTray()
         val count = tray.count { it.isNotEmpty() }
         val sig = tray.joinToString("|") { cells -> cells.joinToString(",") { "${it[0]}${it[1]}" } }
-        if (!waiting) {
-            if (count < 3) {
-                if (analyzedSig != null) sawFewer = true   // Teile wurden gesetzt
-                return
-            }
-            if (sig != analyzedSig || sawFewer) startWaiting()
+        val cells = readCells()
+        val board = cells.joinToString("")
+        val key = "$board/$sig"
+        if (key == lastKey) stable++ else { stable = 0; lastKey = key }
+        if (key == analyzedKey) return
+
+        if (count == 0) {
+            // alle Teile gesetzt: Hinweis weg, auf neuen Satz warten
+            if (ov.items.isNotEmpty()) { ov.items.clear(); ov.invalidate() }
             return
         }
-        val key = readBoard().joinToString("") { if (it) "1" else "0" }
-        if (count == 3 && sig == lastSig && key == lastBoardKey) stable++
-        else { stable = 0; lastSig = sig; lastBoardKey = key }
-        if (stable >= 2) {
-            show(tray)
-            analyzedSig = sig; sawFewer = false; waiting = false
-        }
+        // Teil fehlt, Brett aber unverändert: wird gerade gezogen -> Hinweis stehen lassen
+        if (count < analyzedCount && board == analyzedBoard) return
+        val need = if (count < analyzedCount) STABLE_FEWER else STABLE_NEW
+        if (stable < need) return
+        analyzedKey = key; analyzedBoard = board; analyzedCount = count
+        show(tray, cells)
     }
 
-    private fun show(pieces: List<List<IntArray>>) {
+    /** Prüft, ob der Zug auf dem gescannten Brett wirklich passt (alle Zielfelder sicher leer). */
+    private fun fits(cells: IntArray, m: Solver.Move): Boolean = m.cells.all { x ->
+        val r = m.r + x[0]; val c = m.c + x[1]
+        r in 0..7 && c in 0..7 && cells[r * 8 + c] == EMPTY
+    }
+
+    private fun show(pieces: List<List<IntArray>>, cells: IntArray) {
         val bx = BX * W; val by = BY * H; val cs = BS * W / 8
-        val res = Solver.solve(readBoard(), pieces)
+        // 1. Versuch: unsichere Felder als leer. Passt der Zug nicht sicher, unsichere Felder als belegt.
+        var res = Solver.solve(BooleanArray(64) { cells[it] == FULL }, pieces)
+        if (res != null && res.moves.isNotEmpty() && !fits(cells, res.moves[0]))
+            res = Solver.solve(BooleanArray(64) { cells[it] != EMPTY }, pieces)
         ov.items.clear()
-        if (res == null) {
-            toast("Keine Teile erkannt")
-        } else {
-            res.moves.forEachIndexed { n, m ->
+        val m = res?.moves?.firstOrNull()
+        when {
+            res == null -> toast("Keine Teile erkannt")
+            m == null || !fits(cells, m) -> toast("Kein Teil passt sicher aufs Brett")
+            else -> {
+                ov.stroke = max(6f, cs * 0.08f)
+                val col = COL[m.piece]
                 for (x in m.cells) {
                     val l = bx + (m.c + x[1]) * cs; val t = by + (m.r + x[0]) * cs
-                    ov.items.add(Item(RectF(l + 3, t + 3, l + cs - 3, t + cs - 3), COL[m.piece], "${n + 1}"))
+                    val in0 = ov.stroke / 2 + 2
+                    ov.items.add(Item(RectF(l + in0, t + in0, l + cs - in0, t + cs - in0), col, true))
                 }
+                // Markierung unter dem Teil in der Ablage, das gesetzt werden soll
+                val sx = W * (2 * m.piece + 1) / 6f; val y1 = TY1 * H
+                ov.items.add(Item(RectF(sx - cs * .7f, y1 - 26, sx + cs * .7f, y1 - 12), col, false))
+                if (res.moves.size < pieces.count { it.isNotEmpty() }) toast("Achtung: nicht alle Teile passen")
             }
-            if (res.moves.size < pieces.count { it.isNotEmpty() }) toast("Achtung: nicht alle Teile passen")
         }
         ov.invalidate()
     }
