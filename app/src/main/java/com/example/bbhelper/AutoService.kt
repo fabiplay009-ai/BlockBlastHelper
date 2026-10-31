@@ -30,23 +30,42 @@ class AutoService : AccessibilityService() {
 
     private fun line(x0: Float, y0: Float, x1: Float, y1: Float) = Path().apply { moveTo(x0, y0); lineTo(x1, y1) }
 
-    /**
-     * Zieht von (x0, y0) nach (x1, y1): kurz festhalten, gleichmäßig ziehen, am Ziel kurz halten, loslassen.
-     * [done] bekommt true, wenn die Geste vollständig ausgeführt wurde.
-     */
-    fun drag(x0: Float, y0: Float, x1: Float, y1: Float, done: (Boolean) -> Unit) {
-        val press = GestureDescription.StrokeDescription(line(x0, y0, x0 + 1, y0 + 1), 0, 120, true)
-        val move = press.continueStroke(line(x0 + 1, y0 + 1, x1, y1), 0, 450, true)
-        val hold = move.continueStroke(line(x1, y1, x1 + 1, y1 + 1), 0, 150, false)
-        val steps = listOf(press, move, hold)
-        fun run(i: Int) {
-            if (i == steps.size) { done(true); return }
-            val ok = dispatchGesture(GestureDescription.Builder().addStroke(steps[i]).build(), object : GestureResultCallback() {
-                override fun onCompleted(g: GestureDescription?) { run(i + 1) }
-                override fun onCancelled(g: GestureDescription?) { done(false) }
-            }, null)
-            if (!ok) done(false)
-        }
-        run(0)
+    // Ziehen in Einzelschritten (Finger bleibt zwischen den Schritten auf dem Bildschirm),
+    // damit der Helfer zwischendurch nachsehen kann, wo das Teil gerade schwebt.
+    private var cur: GestureDescription.StrokeDescription? = null
+    private var fx = 0f
+    private var fy = 0f
+
+    private fun send(s: GestureDescription.StrokeDescription, done: (Boolean) -> Unit) {
+        cur = s
+        val ok = dispatchGesture(GestureDescription.Builder().addStroke(s).build(), object : GestureResultCallback() {
+            override fun onCompleted(g: GestureDescription?) { done(true) }
+            override fun onCancelled(g: GestureDescription?) { cur = null; done(false) }
+        }, null)
+        if (!ok) { cur = null; done(false) }
+    }
+
+    /** Finger auf (x, y) setzen und [ms] lang halten. */
+    fun down(x: Float, y: Float, ms: Long, done: (Boolean) -> Unit) {
+        fx = x + 1; fy = y + 1
+        send(GestureDescription.StrokeDescription(line(x, y, fx, fy), 0, ms, true), done)
+    }
+
+    /** Finger in [ms] nach (x, y) bewegen (bleibt danach unten). */
+    fun move(x: Float, y: Float, ms: Long, done: (Boolean) -> Unit) {
+        val c = cur ?: return done(false)
+        val s = c.continueStroke(line(fx, fy, x, y), 0, ms, true)
+        fx = x; fy = y
+        send(s, done)
+    }
+
+    /** Finger [ms] lang ruhig halten. */
+    fun hold(ms: Long, done: (Boolean) -> Unit) = move(fx + 0.5f, fy, ms, done)
+
+    /** Finger loslassen. */
+    fun up(done: (Boolean) -> Unit) {
+        val c = cur ?: return done(false)
+        val s = c.continueStroke(line(fx, fy, fx + 0.5f, fy), 0, 60, false)
+        send(s) { ok -> cur = null; done(ok) }
     }
 }

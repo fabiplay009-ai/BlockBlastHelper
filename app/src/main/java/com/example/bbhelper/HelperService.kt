@@ -82,15 +82,14 @@ class HelperService : Service() {
     private var grabAt: RectF? = null
     private var dragging = false
     private var dragAt = 0L                          // Zeitpunkt der letzten Geste, 0 = keine offen
-    private var usedOffX = 0f; private var usedOffY = 0f; private var usedRows = 1
     private var tryIdx = 0                           // Fehlversuche mit diesem Zug
     private var misses = 0                           // Teile hintereinander an falscher Stelle gelandet
-    // Versatz Teil-Mitte minus Finger beim Ziehen, in Brettfeldern; wird nach jedem Zug nachgelernt.
-    // Getrennt nach Höhe des Teils (1-5 Reihen), weil Spiele das Teil unterschiedlich verankern.
-    private var offX = 0f
-    private val offY = FloatArray(6) { -1.5f }
-    private val learnedY = BooleanArray(6)
-    private val TRY = floatArrayOf(0f, 1f, -1f, 2f, -2f, 3f)   // Zusatzversatz bei Fehlversuchen (Felder)   // nächsten Scan als Bild speichern (nach Tippen auf "Zug")
+    private var lastPieces: List<List<IntArray>> = emptyList()
+    // Feinkorrektur des Zielpunkts in Brettfeldern; wird aus der tatsächlichen Landeposition nachgelernt
+    private var corrX = 0f
+    private var corrY = 0f
+    private var usedCorrX = 0f
+    private var usedCorrY = 0f
 
     private val EMPTY = 0
     private val FULL = 1
@@ -153,7 +152,7 @@ class HelperService : Service() {
             layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
         })
         auto = i.getBooleanExtra("auto", false)
-        if (auto) loadOffsets()
+        if (auto) { corrX = prefs().getFloat("corrX", 0f); corrY = prefs().getFloat("corrY", 0f) }
         btn = TextView(this).apply {
             text = if (auto) "⏸ Auto" else "↻ Zug"; setTextColor(Color.WHITE); setPadding(32, 20, 32, 20)
             setBackgroundColor(0xCC2D3280.toInt())
@@ -325,7 +324,7 @@ class HelperService : Service() {
         if (auto && dragAt > 0) learn(cells, count)
         analyzedKey = key; analyzedBoard = board; analyzedCount = count
         show(tray, cells)
-        if (auto) planDrag(cells, count)
+        if (auto) { lastPieces = tray; planDrag(cells, count) }
     }
 
     /** Prüft, ob der Zug auf dem gescannten Brett wirklich passt (alle Zielfelder sicher leer). */
@@ -373,18 +372,6 @@ class HelperService : Service() {
 
     private fun prefs() = getSharedPreferences("auto", Context.MODE_PRIVATE)
 
-    private fun loadOffsets() {
-        val p = prefs()
-        offX = p.getFloat("offX", 0f)
-        for (r in 1..5) { offY[r] = p.getFloat("offY$r", -1.5f); learnedY[r] = p.getBoolean("learned$r", false) }
-    }
-
-    private fun saveOffsets() {
-        val e = prefs().edit().putFloat("offX", offX)
-        for (r in 1..5) e.putFloat("offY$r", offY[r]).putBoolean("learned$r", learnedY[r])
-        e.apply()
-    }
-
     private fun togglePause() {
         paused = !paused
         btn.text = if (paused) "▶ Auto" else "⏸ Auto"
@@ -405,6 +392,53 @@ class HelperService : Service() {
         h.postDelayed({ doDrag() }, 500)
     }
 
+    /**
+     * Sucht das gerade gezogene (schwebende) Teil im Bereich unter dem Brett.
+     * Die anderen Teile der Ablage werden ausgeblendet. null = nicht (vollständig) gefunden.
+     */
+    private fun findFloating(skip: Int): RectF? {
+        val cs = BS * W / 8
+        val top = (BY * H + 8 * cs + 6).toInt(); val bot = (H * 0.93f).toInt()
+        val bar0 = TY1 * H - 32; val bar1 = TY1 * H - 6      // Markierungsbalken des Hinweises
+        val rs = ArrayList<Int>(); val gs = ArrayList<Int>(); val bs = ArrayList<Int>()
+        for (y in top until bot step 12) for (x in 4 until W - 4 step 12) {
+            val p = rgb(x, y); rs.add(p[0]); gs.add(p[1]); bs.add(p[2])
+        }
+        if (rs.isEmpty()) return null
+        rs.sort(); gs.sort(); bs.sort()
+        val bg = intArrayOf(rs[rs.size / 2], gs[gs.size / 2], bs[bs.size / 2])
+        val er = max(2, (6f * W / 1080f).roundToInt())
+        fun on(x: Int, y: Int) = dist(rgb(x, y), bg) > MIND
+        val other = (0..2).filter { it != skip }.mapNotNull { trayBox[it] }.map { RectF(it).apply { inset(-8f, -8f) } }
+        var mnX = Int.MAX_VALUE; var mnY = Int.MAX_VALUE; var mxX = -1; var mxY = -1
+        for (y in top until bot step 4) {
+            if (y >= bar0 && y <= bar1) continue
+            for (x in 4 until W - 4 step 4) {
+                if (other.any { it.contains(x.toFloat(), y.toFloat()) }) continue
+                if (on(x, y) && on(x - er, y) && on(x + er, y) && on(x, y - er) && on(x, y + er)) {
+                    mnX = min(mnX, x); mxX = max(mxX, x); mnY = min(mnY, y); mxY = max(mxY, y)
+                }
+            }
+        }
+        if (mxX < 0) return null
+        if (mnY <= top + 8 || mxY >= bot - 8) return null    // ragt aus dem Suchbereich: Lage unsicher
+        return RectF(mnX.toFloat(), mnY.toFloat(), mxX.toFloat(), mxY.toFloat())
+    }
+
+    /** Passt die gefundene Fläche zur Form des Teils (ungefähr Brett-Feldgröße)? */
+    private fun plausible(r: RectF, rows: Int, cols: Int): Boolean {
+        val cs = BS * W / 8
+        val fw = r.width() / cols / cs; val fh = r.height() / rows / cs
+        return fw in 0.45f..1.4f && fh in 0.45f..1.4f && abs(fw - fh) < 0.25f
+    }
+
+    /**
+     * Ziehen mit Hinsehen:
+     *  1. Teil greifen und halten -> Lage des schwebenden Teils messen (P0 bei Finger F0)
+     *  2. Finger etwas nach unten/zur Mitte bewegen -> erneut messen (P1 bei F1)
+     *  3. Daraus Verstärkung k und Versatz berechnen: P = P0 + k * (F - F0)
+     *  4. Finger so hinbewegen, dass die Teil-Mitte genau über dem Ziel liegt, loslassen.
+     */
     private fun doDrag() {
         if (!running || paused || dragging) return
         val m = planned ?: return
@@ -413,31 +447,75 @@ class HelperService : Service() {
         if (svc == null) { pauseWith("Automatik: Bedienungshilfe \"Block-Helfer Automatik\" ist nicht eingeschaltet"); return }
         val bx = BX * W; val by = BY * H; val cs = BS * W / 8
         val rows = m.cells.maxOf { it[0] } + 1; val cols = m.cells.maxOf { it[1] } + 1
-        // Ziel: Mitte des Teils auf dem Brett; Finger = Ziel minus Versatz (Teil schwebt über dem Finger)
-        val tcx = bx + (m.c + cols / 2f) * cs; val tcy = by + (m.r + rows / 2f) * cs
-        usedRows = rows.coerceIn(1, 5)
-        usedOffX = offX; usedOffY = offY[usedRows] + TRY[tryIdx]
-        val fx = (tcx - usedOffX * cs).coerceIn(5f, W - 5f)
-        val fy = (tcy - usedOffY * cs).coerceIn(5f, H - 5f)
+        usedCorrX = corrX; usedCorrY = corrY
+        val tx = bx + (m.c + cols / 2f + usedCorrX) * cs
+        val ty = by + (m.r + rows / 2f + usedCorrY) * cs
+        val sx = box.centerX(); val sy = box.centerY()
+        val top = BY * H + 8 * cs
         dragging = true
-        svc.drag(box.centerX(), box.centerY(), fx, fy) { ok ->
-            h.post {
-                dragging = false
-                dragAt = SystemClock.uptimeMillis()
-                if (!ok) dragFailed()
-            }
+
+        fun fail(msg: String) {
+            svc.up { h.post {
+                dragging = false; dragAt = 0
+                saveDebug("Auto: $msg", lastPieces, readCells(), m)
+                pauseWith("Automatik pausiert: $msg")
+            } }
         }
+        fun lost() = h.post { dragging = false; dragFailed() }
+
+        // Schritt 3+4: aus zwei Messungen Verstärkung und Versatz berechnen, hinziehen, loslassen
+        fun finish(f0x: Float, f0y: Float, p0: RectF, f1x: Float, f1y: Float, p1: RectF) {
+            val kx = (p1.centerX() - p0.centerX()) / (f1x - f0x)
+            val ky = (p1.centerY() - p0.centerY()) / (f1y - f0y)
+            if (kx !in 0.5f..4f || ky !in 0.5f..4f) { fail("Zugverhalten nicht messbar (k=%.2f/%.2f)".format(kx, ky)); return }
+            val fx = f0x + (tx - p0.centerX()) / kx
+            val fy = f0y + (ty - p0.centerY()) / ky
+            if (fx < 2 || fx > W - 2 || fy < 2 || fy > H - 2) { fail("Ziel außerhalb des Bildschirms"); return }
+            svc.move(fx, fy, 450) { ok -> if (!ok) lost() else svc.hold(200) { _ ->
+                svc.up { _ -> h.post { dragging = false; dragAt = SystemClock.uptimeMillis() } }
+            } }
+        }
+
+        // Schritt 2: Finger seitlich (zur Mitte) und – je nach Platz – etwas hoch oder runter, erneut messen
+        fun second(f0x: Float, f0y: Float, p0: RectF) {
+            val f1x = f0x + (if (f0x < W / 2f) 1.2f else -1.2f) * cs
+            val up = p0.top - top > 2.2f * cs
+            val f1y = if (up) f0y - 0.7f * cs else min(f0y + 0.7f * cs, H * 0.97f)
+            svc.move(f1x, f1y, 250) { ok -> if (!ok) lost() else svc.hold(250) { ok2 -> h.post {
+                if (!ok2) { dragging = false; dragFailed(); return@post }
+                grab()
+                val p1 = findFloating(m.piece)
+                if (p1 == null || !plausible(p1, rows, cols)) { fail("gezogenes Teil nicht gefunden (2)"); return@post }
+                finish(f0x, f0y, p0, f1x, f1y, p1)
+            } } }
+        }
+
+        // Schritt 1: greifen, halten, messen (schwebt das Teil schon über dem Brett: Finger tiefer, nochmal)
+        svc.down(sx, sy, 350) { ok0 -> h.post {
+            if (!ok0) { dragging = false; dragFailed(); return@post }
+            grab()
+            val p0 = findFloating(m.piece)
+            if (p0 != null && plausible(p0, rows, cols)) { second(sx, sy, p0); return@post }
+            val ly = min(sy + 1.2f * cs, H * 0.97f)
+            svc.move(sx, ly, 200) { ok -> if (!ok) lost() else svc.hold(250) { ok1 -> h.post {
+                if (!ok1) { dragging = false; dragFailed(); return@post }
+                grab()
+                val q0 = findFloating(m.piece)
+                if (q0 == null || !plausible(q0, rows, cols)) { fail("gezogenes Teil nicht gefunden (1)"); return@post }
+                second(sx, ly, q0)
+            } } }
+        } }
     }
 
-    /** Das Teil liegt nach der Geste noch in der Ablage: anders versetzt nochmal probieren. */
+    /** Das Teil liegt nach der Geste noch in der Ablage: nochmal versuchen, sonst pausieren. */
     private fun dragFailed() {
         dragAt = 0
         tryIdx++
-        if (tryIdx >= TRY.size) { tryIdx = 0; pauseWith("Automatik pausiert: Teil ließ sich nicht setzen"); return }
-        h.postDelayed({ doDrag() }, 300)
+        if (tryIdx >= 3) { tryIdx = 0; pauseWith("Automatik pausiert: Teil ließ sich nicht setzen"); return }
+        h.postDelayed({ doDrag() }, 400)
     }
 
-    /** Nach einem Zug: wo ist das Teil wirklich gelandet? Abweichung in den Versatz übernehmen. */
+    /** Nach einem Zug: wo ist das Teil wirklich gelandet? Kleine Abweichungen in die Korrektur übernehmen. */
     private fun learn(cells: IntArray, count: Int) {
         dragAt = 0
         val m = planned ?: return
@@ -450,21 +528,11 @@ class HelperService : Service() {
         val shape = fresh.map { (it / 8 - r0) * 8 + (it % 8 - c0) }.toSet()
         if (shape != m.cells.map { it[0] * 8 + it[1] }.toSet()) return
         val dr = r0 - m.r; val dc = c0 - m.c
-        if (dr == 0 && dc == 0) {
-            misses = 0
-            if (!learnedY[usedRows] || offY[usedRows] != usedOffY || offX != usedOffX) {
-                offY[usedRows] = usedOffY; offX = usedOffX
-                learnedY[usedRows] = true
-                for (r in 1..5) if (!learnedY[r]) offY[r] = usedOffY
-                saveOffsets()
-            }
-            return
-        }
-        // falsch gelandet: Versatz korrigieren (Teil landete dr/dc Felder daneben)
-        offX = usedOffX + dc; offY[usedRows] = usedOffY + dr
-        learnedY[usedRows] = true
-        for (r in 1..5) if (!learnedY[r]) offY[r] = offY[usedRows]
-        saveOffsets()
+        if (dr == 0 && dc == 0) { misses = 0; return }
+        // daneben gelandet: Ziel beim nächsten Mal entgegengesetzt verschieben (höchstens 1 Feld je Schritt)
+        corrX = (usedCorrX - dc.coerceIn(-1, 1) * 0.5f).coerceIn(-2f, 2f)
+        corrY = (usedCorrY - dr.coerceIn(-1, 1) * 0.5f).coerceIn(-2f, 2f)
+        prefs().edit().putFloat("corrX", corrX).putFloat("corrY", corrY).apply()
         misses++
         if (misses >= 4) { misses = 0; pauseWith("Automatik pausiert: Teile landen mehrmals daneben") }
     }
