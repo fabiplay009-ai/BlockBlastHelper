@@ -433,8 +433,8 @@ class HelperService : Service() {
 
     /**
      * Ziehen mit Hinsehen:
-     *  1. Teil greifen und halten -> Lage des schwebenden Teils messen (P0 bei Finger F0)
-     *  2. Finger etwas nach unten/zur Mitte bewegen -> erneut messen (P1 bei F1)
+     *  1. Teil greifen und halten, bis es ruhig schwebt -> Lage messen (P0 bei Finger F0)
+     *  2. Finger etwas zur Mitte (und je nach Platz hoch/runter) bewegen -> erneut messen (P1 bei F1)
      *  3. Daraus Verstärkung k und Versatz berechnen: P = P0 + k * (F - F0)
      *  4. Finger so hinbewegen, dass die Teil-Mitte genau über dem Ziel liegt, loslassen.
      */
@@ -462,47 +462,51 @@ class HelperService : Service() {
         }
         fun lost() = h.post { dragging = false; dragFailed() }
 
-        // Schritt 3+4: aus zwei Messungen Verstärkung und Versatz berechnen, hinziehen, loslassen
-        fun finish(f0x: Float, f0y: Float, p0: RectF, f1x: Float, f1y: Float, p1: RectF) {
-            val kx = (p1.centerX() - p0.centerX()) / (f1x - f0x)
-            val ky = (p1.centerY() - p0.centerY()) / (f1y - f0y)
-            if (kx !in 0.5f..4f || ky !in 0.5f..4f) { fail("Zugverhalten nicht messbar (k=%.2f/%.2f)".format(kx, ky)); return }
-            val fx = f0x + (tx - p0.centerX()) / kx
-            val fy = f0y + (ty - p0.centerY()) / ky
-            if (fx < 2 || fx > W - 2 || fy < 2 || fy > H - 2) { fail("Ziel außerhalb des Bildschirms"); return }
-            svc.move(fx, fy, 450) { ok -> if (!ok) lost() else svc.hold(200) { _ ->
-                svc.up { _ -> h.post { dragging = false; dragAt = SystemClock.uptimeMillis() } }
+        // Schritt 2: Finger seitlich zur Mitte und – nur so weit Platz ist – hoch oder runter, erneut messen.
+        // (Das Spiel bewegt das Teil um ein Vielfaches des Fingers, daher vorsichtig.)
+        fun second(p0: RectF) {
+            val bot = TY1 * H - 34
+            val roomDown = bot - p0.bottom; val roomUp = p0.top - top
+            val dxF = (if (sx < W / 2f) 1.2f else -1.2f) * cs
+            var dyF = if (roomDown > roomUp) min(roomDown * 0.3f, cs) else -min(roomUp * 0.3f, cs)
+            if (abs(dyF) < 0.15f * cs) dyF = 0f        // kein Platz: senkrecht wie waagerecht annehmen
+            val f1x = sx + dxF; val f1y = sy + dyF
+            svc.move(f1x, f1y, 200) { ok -> if (!ok) lost() else measure(svc, m.piece, rows, cols, 12, null) { p1 -> h.post {
+                if (p1 == null) { fail("gezogenes Teil nicht gefunden (2)"); return@post }
+                val kx = (p1.centerX() - p0.centerX()) / dxF
+                val ky = if (dyF != 0f) (p1.centerY() - p0.centerY()) / dyF else kx
+                if (kx !in 0.5f..5f || ky !in 0.5f..5f) { fail("Zugverhalten nicht messbar (k=%.2f/%.2f)".format(kx, ky)); return@post }
+                val fx = sx + (tx - p0.centerX()) / kx
+                val fy = sy + (ty - p0.centerY()) / ky
+                if (fx < 2 || fx > W - 2 || fy < 2 || fy > H - 2) { fail("Ziel außerhalb des Bildschirms"); return@post }
+                svc.move(fx, fy, 450) { ok2 -> if (!ok2) lost() else svc.hold(200) { _ ->
+                    svc.up { _ -> h.post { dragging = false; dragAt = SystemClock.uptimeMillis() } }
+                } }
+            } } }
+        }
+
+        // Schritt 1: greifen und halten, bis das Teil fertig "angehoben" ist und ruhig liegt, dann messen
+        svc.down(sx, sy, 150) { ok0 ->
+            if (!ok0) lost()
+            else measure(svc, m.piece, rows, cols, 12, null) { p0 -> h.post {
+                if (p0 == null) fail("gezogenes Teil nicht gefunden (1)") else second(p0)
             } }
         }
+    }
 
-        // Schritt 2: Finger seitlich (zur Mitte) und – je nach Platz – etwas hoch oder runter, erneut messen
-        fun second(f0x: Float, f0y: Float, p0: RectF) {
-            val f1x = f0x + (if (f0x < W / 2f) 1.2f else -1.2f) * cs
-            val up = p0.top - top > 2.2f * cs
-            val f1y = if (up) f0y - 0.7f * cs else min(f0y + 0.7f * cs, H * 0.97f)
-            svc.move(f1x, f1y, 250) { ok -> if (!ok) lost() else svc.hold(250) { ok2 -> h.post {
-                if (!ok2) { dragging = false; dragFailed(); return@post }
-                grab()
-                val p1 = findFloating(m.piece)
-                if (p1 == null || !plausible(p1, rows, cols)) { fail("gezogenes Teil nicht gefunden (2)"); return@post }
-                finish(f0x, f0y, p0, f1x, f1y, p1)
-            } } }
-        }
-
-        // Schritt 1: greifen, halten, messen (schwebt das Teil schon über dem Brett: Finger tiefer, nochmal)
-        svc.down(sx, sy, 350) { ok0 -> h.post {
-            if (!ok0) { dragging = false; dragFailed(); return@post }
+    /**
+     * Hält den Finger ruhig und misst wiederholt (alle ~100 ms), bis das schwebende Teil zweimal
+     * hintereinander an derselben Stelle in passender Größe gefunden wird. null = nicht gefunden.
+     */
+    private fun measure(svc: AutoService, piece: Int, rows: Int, cols: Int, tries: Int, last: RectF?, done: (RectF?) -> Unit) {
+        svc.hold(100) { ok -> h.post {
+            if (!ok) { done(null); return@post }
             grab()
-            val p0 = findFloating(m.piece)
-            if (p0 != null && plausible(p0, rows, cols)) { second(sx, sy, p0); return@post }
-            val ly = min(sy + 1.2f * cs, H * 0.97f)
-            svc.move(sx, ly, 200) { ok -> if (!ok) lost() else svc.hold(250) { ok1 -> h.post {
-                if (!ok1) { dragging = false; dragFailed(); return@post }
-                grab()
-                val q0 = findFloating(m.piece)
-                if (q0 == null || !plausible(q0, rows, cols)) { fail("gezogenes Teil nicht gefunden (1)"); return@post }
-                second(sx, ly, q0)
-            } } }
+            val p = findFloating(piece)?.takeIf { plausible(it, rows, cols) }
+            if (p != null && last != null && abs(p.centerX() - last.centerX()) <= 4 &&
+                abs(p.centerY() - last.centerY()) <= 4 && abs(p.width() - last.width()) <= 6) { done(p); return@post }
+            if (tries <= 0) { done(null); return@post }
+            measure(svc, piece, rows, cols, tries - 1, p, done)
         } }
     }
 
