@@ -314,6 +314,8 @@ class HelperService : Service() {
         val now = readTray()
         val want = lastPieces.getOrNull(m.piece)
         if (want == null || Vision.signature(listOf(now[m.piece])) != Vision.signature(listOf(want))) {
+            // Fehlerbild zur Analyse (z. B. Schriftzug/Animation über der Ablage für ein Teil gehalten)
+            try { saveDebug("Auto: Ablage hat sich vor dem Greifen geändert – neu gerechnet", now, readCells(), null) } catch (_: Exception) {}
             analyzedKey = null; stableSince = SystemClock.uptimeMillis()
             return
         }
@@ -323,6 +325,7 @@ class HelperService : Service() {
         dragging = true
         lastFloat = null
         landingDone = false
+        brain.retry = tryIdx                             // bei Wiederholung Ziel probeweise etwas versetzen
         val pc = Vision.pieceColor(Vision.Frame(refFb, frs, W, H), Vision.Box(box.left, box.top, box.right, box.bottom))
         DragJob(svc, m, box.centerX(), box.centerY(), pc).start()
     }
@@ -435,7 +438,7 @@ class HelperService : Service() {
         brain.notPlaced()      // Form beim nächsten Versuch neu vermessen (gespeicherte Werte passten nicht)
         saveBrain()
         tryIdx++
-        if (tryIdx >= 3) { tryIdx = 0; pauseWith("Automatik pausiert: Teil ließ sich nicht setzen"); return }
+        if (tryIdx >= 5) { tryIdx = 0; pauseWith("Automatik pausiert: Teil ließ sich nicht setzen"); return }
         h.postDelayed({ doDrag() }, 400)
     }
 

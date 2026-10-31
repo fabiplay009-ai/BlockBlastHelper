@@ -26,6 +26,9 @@ public final class AutoBrain {
     public String lastKey = "";
     public boolean lastFast;
     public int misses;
+    /** Wiederholung desselben Zugs (Teil sprang zurück): Ziel probeweise etwas versetzen, um das Einrasten zu finden. */
+    public int retry;
+    static final float[][] EXPLORE = {{0, 0}, {0, -0.45f}, {0, 0.45f}, {-0.45f, 0}, {0.45f, 0}};
 
     public static String key(int rows, int cols) { return rows + "x" + cols; }
 
@@ -79,7 +82,8 @@ public final class AutoBrain {
     public float[] fingerFor(float rawX, float rawY, float px, float py, float kx, float ky,
                              float fx0, float fy0, float cs, int W, int H) {
         usedTravelX = (rawX - px) / cs; usedTravelY = (rawY - py) / cs;
-        usedCorrX = -predict(learnX, usedTravelX); usedCorrY = -predict(learnY, usedTravelY);
+        float[] ex = EXPLORE[Math.min(retry, EXPLORE.length - 1)];
+        usedCorrX = -predict(learnX, usedTravelX) + ex[0]; usedCorrY = -predict(learnY, usedTravelY) + ex[1];
         float tx = rawX + usedCorrX * cs, ty = rawY + usedCorrY * cs;
         float fx = fx0 + (tx - px) / kx, fy = fy0 + (ty - py) / ky;
         if (fx < 2 || fx > W - 2 || fy < 2 || fy > H - 2) return null;
@@ -191,8 +195,9 @@ public final class AutoBrain {
         final float cs, sx, sy, rawX, rawY, top, boardBot, bot;
         public final String key;
 
-        public int phase = 1, ticks = 0, lowered = 0;
+        public int phase = 1, ticks = 0, lowered = 0, shifted = 0;
         public float f0x, f0y, dxF, dyF;
+        float prevBottom = Float.NaN, prevF0y;      // Lage vor dem letzten Tiefersetzen (zum Schätzen der Verstärkung)
         Vision.Box last, p0;
         final ArrayList<Vision.Box> good = new ArrayList<>();
         public String info = "";
@@ -238,13 +243,42 @@ public final class AutoBrain {
             else if (!below) info = "Teil ragt ins Brett";
             else info = String.format("Fläche %.2f x %.2f Felder (erwartet %d x %d), passend: %d",
                     raw.width() / cs, raw.height() / cs, cols, rows, good.size() + (p != null ? 1 : 0));
-            if (lowered > 0) info += ", Finger " + lowered + "x tiefer";
-            // Phase 1: ragt das Teil (nach dem Anheben) ins Brett, Finger tiefer setzen
-            if (phase == 1 && p == null && raw != null && !below && ticks >= 3 && lowered < 4 && f0y < H * 0.97f) {
-                lowered++;
-                f0y = Math.min(f0y + 0.7f * cs, H * 0.97f);
-                newPhase(1);
-                return move(f0x, f0y);
+            if (lowered + shifted > 0) info += ", Finger " + (lowered + shifted) + "x nachgesetzt";
+            // Phase 1: klebt das Teil am Bildschirmrand, hat das Spiel es dorthin geschoben (es würde sonst
+            // hinausragen) – die gemessene Lage passt dann nicht zur Fingerbewegung. Finger erst zur Mitte rücken.
+            if (phase == 1 && raw != null && shifted < 4) {
+                boolean atLeft = raw.left < 0.25f * cs, atRight = raw.right > W - 0.25f * cs;
+                if (atLeft != atRight) {
+                    shifted++;
+                    f0x = Math.max(cs, Math.min(W - cs, f0x + (atLeft ? 1 : -1) * cs));
+                    newPhase(1);
+                    return move(f0x, f0y);
+                }
+            }
+            // Phase 1: Lage korrigieren, bis das Teil ganz unter dem Brett schwebt. Über gleichfarbigen Brett-Blöcken
+            // ist das Teil unsichtbar – endet die Fläche oben an der Brettkante, ragt es also vermutlich hinein.
+            if (phase == 1 && p == null && raw != null && ticks >= 3 && lowered < 6) {
+                float fullH = rows * cs;
+                boolean touchBottom = raw.bottom >= bot - 8;
+                boolean hiddenTop = raw.top < boardBot + 0.3f * cs;
+                float shift = 0;                     // gewünschte Verschiebung des Teils in px (+ = nach unten)
+                if (hiddenTop && !touchBottom) shift = (boardBot + 0.15f * cs) - (raw.bottom - fullH);
+                else if (touchBottom && !hiddenTop) shift = (bot - 0.25f * cs) - (raw.top + fullH);
+                if (Math.abs(shift) > 0.05f * cs) {
+                    // Verstärkung: bekannt, sonst aus dem letzten Tiefersetzen, sonst vorsichtig geschätzt
+                    float k = 2f;
+                    float[] ck = calK();
+                    if (ck != null) k = ck[1];
+                    else if (!Float.isNaN(prevBottom) && f0y != prevF0y) {
+                        float m = (raw.bottom - prevBottom) / (f0y - prevF0y);
+                        if (m > 0.5f && m < 5f) k = m;
+                    }
+                    if (!touchBottom) { prevBottom = raw.bottom; prevF0y = f0y; }
+                    lowered++;
+                    f0y = Math.max(sy - 3 * cs, Math.min(H * 0.97f, f0y + shift / k));
+                    newPhase(1);
+                    return move(f0x, f0y);
+                }
             }
             if (p != null) {
                 Vision.Box l = last;

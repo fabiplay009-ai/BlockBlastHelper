@@ -207,7 +207,11 @@ public final class Vision {
     /** Unterer Rand des Suchbereichs: knapp über der Werbung (der Hinweis-Balken ist unverändert und fällt weg). */
     public static float floatBottom(int h) { return h * 0.925f; }
 
-    /** Farbe des Teils in der Ablage (Median der Teil-Pixel im Bild vor dem Greifen). */
+    /**
+     * Farbe des Teils in der Ablage (im Bild vor dem Greifen): die häufigste Farbe unter den Pixeln, die sich
+     * vom Hintergrund abheben – also die große Blockfläche, nicht die hellen/dunklen Kanten. (Früher: nur sehr
+     * auffällige Pixel; im Holz-Design fiel die Blockfläche dadurch heraus und es blieb die Kantenfarbe übrig.)
+     */
     public static int[] pieceColor(Frame f, Box box) {
         int W = f.w, H = f.h;
         float cs = cell(W);
@@ -217,13 +221,20 @@ public final class Vision {
         if (bgs.isEmpty()) return null;
         int[] bg = median(bgs);
         ArrayList<int[]> ps = new ArrayList<>();
-        for (int y = (int) box.top; y < box.bottom; y += 3)
-            for (int x = (int) box.left; x < box.right; x += 3) {
+        int[] hist = new int[16 * 16 * 16];
+        for (int y = (int) box.top; y < box.bottom; y += 2)
+            for (int x = (int) box.left; x < box.right; x += 2) {
                 int[] c = f.rgb(x, y);
-                if (dist(c, bg) > MIND * 1.5) ps.add(c);
+                if (dist(c, bg) > MIND) { ps.add(c); hist[(c[0] >> 4) * 256 + (c[1] >> 4) * 16 + (c[2] >> 4)]++; }
             }
         if (ps.size() < 10) return null;
-        return median(ps);
+        int best = 0;
+        for (int i = 1; i < hist.length; i++) if (hist[i] > hist[best]) best = i;
+        // Median der Pixel in der Nachbarschaft der häufigsten Farbe
+        int br = (best >> 8) * 16 + 8, bgr = ((best >> 4) & 15) * 16 + 8, bb = (best & 15) * 16 + 8;
+        ArrayList<int[]> core = new ArrayList<>();
+        for (int[] c : ps) if (dist(c, new int[]{br, bgr, bb}) < 28) core.add(c);
+        return median(core.isEmpty() ? ps : core);
     }
 
     private static int[] median(List<int[]> l) {
