@@ -528,8 +528,8 @@ class HelperService : Service() {
     private var measureInfo = ""
     private var lastFloat: RectF? = null              // zuletzt gefundene Fläche (fürs Fehlerbild)
 
-    private fun measure(svc: AutoService, piece: Int, rows: Int, cols: Int, tries: Int, last: RectF?, done: (RectF?) -> Unit,
-                        good: ArrayList<RectF> = ArrayList()) {
+    private fun measure(svc: AutoService, piece: Int, rows: Int, cols: Int, tries: Int, last: RectF?,
+                        good: ArrayList<RectF> = ArrayList(), done: (RectF?) -> Unit) {
         val cs = BS * W / 8
         svc.hold(100) { ok -> h.post {
             if (!ok) { measureInfo = "Geste abgebrochen"; done(null); return@post }
@@ -556,7 +556,7 @@ class HelperService : Service() {
                 } else done(null)
                 return@post
             }
-            measure(svc, piece, rows, cols, tries - 1, p, done, good)
+            measure(svc, piece, rows, cols, tries - 1, p, good, done)
         } }
     }
 
