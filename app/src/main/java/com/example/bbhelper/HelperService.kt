@@ -96,6 +96,14 @@ class HelperService : Service() {
     private var usedCorrY = 0f
     private var usedTravelX = 0f
     private var usedTravelY = 0f
+    // Vermessung je Teilform ("ReihenxSpalten"): Lage der Teil-Mitte zum Finger nach dem Greifen (Felder)
+    // und Verstärkung der Zugbewegung. Damit geht es ab dem zweiten Teil einer Form ohne Ausmessen.
+    private val calOff = HashMap<String, FloatArray>()
+    private var calK: FloatArray? = null
+    private val fastMiss = HashMap<String, Int>()
+    private var lastDragKey = ""
+    private var lastDragFast = false
+    private var landingDone = false
 
     private val EMPTY = 0
     private val FULL = 1
@@ -127,7 +135,7 @@ class HelperService : Service() {
         override fun run() {
             if (!running) return
             try { tick() } catch (e: Exception) { /* nächster Versuch */ }
-            h.postDelayed(this, POLL_MS)
+            h.postDelayed(this, if (auto) 200L else POLL_MS)
         }
     }
 
@@ -395,7 +403,7 @@ class HelperService : Service() {
         if (paused) return
         val box = trayBox[m.piece] ?: return
         plannedBoard = cells; plannedCount = count; grabAt = RectF(box)
-        h.postDelayed({ doDrag() }, 500)
+        h.postDelayed({ doDrag() }, 250)
     }
 
     /**
@@ -404,7 +412,31 @@ class HelperService : Service() {
      * Brett, andere Teile und Hinweis-Balken von selbst weg. null = nicht (vollständig) gefunden.
      * Läuft im Mess-Thread, deshalb ohne Speicher-Anlegen pro Pixel (schnell).
      */
-    private fun findFloating(): RectF? {
+    /** Farbe des Teils in der Ablage (Median der Teil-Pixel im Bild vor dem Greifen). */
+    private fun pieceColor(box: RectF, f: ByteArray): IntArray? {
+        val cs = BS * W / 8
+        val bgTop = (BY * H + 8 * cs + 6).toInt(); val bot = (TY1 * H - 34).toInt(); val st = frs
+        if (st <= 0 || f.isEmpty()) return null
+        fun c(x: Int, y: Int): IntArray? {
+            val o = y.coerceIn(0, H - 1) * st + x.coerceIn(0, W - 1) * 4
+            return if (o + 2 >= f.size) null else intArrayOf(f[o].toInt() and 255, f[o + 1].toInt() and 255, f[o + 2].toInt() and 255)
+        }
+        val bgs = ArrayList<IntArray>()
+        for (y in bgTop until bot step 16) for (x in 4 until W - 4 step 16) c(x, y)?.let { bgs.add(it) }
+        if (bgs.isEmpty()) return null
+        val bg = IntArray(3) { k -> bgs.map { it[k] }.sorted()[bgs.size / 2] }
+        val ps = ArrayList<IntArray>()
+        var y = box.top.toInt()
+        while (y < box.bottom) {
+            var x = box.left.toInt()
+            while (x < box.right) { c(x, y)?.takeIf { dist(it, bg) > MIND * 1.5 }?.let { ps.add(it) }; x += 3 }
+            y += 3
+        }
+        if (ps.size < 10) return null
+        return IntArray(3) { k -> ps.map { it[k] }.sorted()[ps.size / 2] }
+    }
+
+    private fun findFloating(pc: IntArray? = null): RectF? {
         val cs = BS * W / 8
         val top = (BY * H + 4).toInt(); val bot = (TY1 * H - 34).toInt()
         val bgTop = (BY * H + 8 * cs + 6).toInt()            // Hintergrundfarbe nur unter dem Brett bestimmen
@@ -421,12 +453,18 @@ class HelperService : Service() {
         val bgR = rs[rs.size / 2]; val bgG = gs[gs.size / 2]; val bgB = bs[bs.size / 2]
         val er = max(2, (6f * W / 1080f).roundToInt())
         val hasRef = rf.size == f.size
-        val md2 = MIND * MIND; val rd2 = 30 * 30
+        val md2 = MIND * MIND; val rd2 = 30 * 30; val pd2 = 60 * 60
+        // Nur Pixel in der Farbe des Teils: der dunklere "Schatten", den das Spiel an der Landestelle
+        // zeichnet, zählt so nicht zum Teil (sonst wird die Fläche zu groß gemessen).
         fun on(x: Int, y: Int): Boolean {
             val o = off(x, y); if (o + 2 >= f.size) return false
             val r = f[o].toInt() and 255; val g = f[o + 1].toInt() and 255; val b = f[o + 2].toInt() and 255
             val dr = r - bgR; val dg = g - bgG; val db = b - bgB
             if (dr * dr + dg * dg + db * db <= md2) return false
+            if (pc != null) {
+                val pr = r - pc[0]; val pg = g - pc[1]; val pb = b - pc[2]
+                if (pr * pr + pg * pg + pb * pb > pd2) return false
+            }
             if (!hasRef) return true
             val er2 = r - (rf[o].toInt() and 255); val eg = g - (rf[o + 1].toInt() and 255); val eb = b - (rf[o + 2].toInt() and 255)
             return er2 * er2 + eg * eg + eb * eb > rd2
@@ -474,17 +512,20 @@ class HelperService : Service() {
         val box = grabAt ?: return
         val svc = AutoService.inst
         if (svc == null) { pauseWith("Automatik: Bedienungshilfe \"Block-Helfer Automatik\" ist nicht eingeschaltet"); return }
+        grab()                                           // frisches Bild als Vergleich (mit Hinweis-Rahmen)
         if (refFb.size != fb.size) refFb = ByteArray(fb.size)
         System.arraycopy(fb, 0, refFb, 0, fb.size)
         dragging = true
         lastFloat = null
-        DragJob(svc, m, box.centerX(), box.centerY()).start()
+        landingDone = false
+        DragJob(svc, m, box.centerX(), box.centerY(), pieceColor(box, refFb)).start()
     }
 
-    private inner class DragJob(val svc: AutoService, val m: Solver.Move, val sx: Float, val sy: Float) {
+    private inner class DragJob(val svc: AutoService, val m: Solver.Move, val sx: Float, val sy: Float, val pc: IntArray?) {
         val cs = BS * W / 8
         val rows = m.cells.maxOf { it[0] } + 1
         val cols = m.cells.maxOf { it[1] } + 1
+        val key = "${rows}x$cols"
         val rawX = BX * W + (m.c + cols / 2f) * cs
         val rawY = BY * H + (m.r + rows / 2f) * cs
         val top = BY * H
@@ -502,7 +543,48 @@ class HelperService : Service() {
         var dyF = 0f
 
         fun start() {
+            lastDragKey = key
+            val k = calK; val off = calOff[key]
+            if (k != null && off != null) { fast(k, off); return }
+            lastDragFast = false
             svc.down(sx, sy, 150) { ok -> if (!ok) h.post { dragging = false; dragFailed() } else startPhase(1) }
+        }
+
+        /** Form schon vermessen: greifen, kurz anheben lassen, direkt zum Ziel, loslassen. */
+        fun fast(k: FloatArray, off: FloatArray) {
+            lastDragFast = true
+            val p0x = sx + off[0] * cs; val p0y = sy + off[1] * cs
+            val (fx, fy) = fingerFor(p0x, p0y, k[0], k[1]) ?: run { calOff.remove(key); lastDragFast = false
+                svc.down(sx, sy, 150) { ok -> if (!ok) h.post { dragging = false; dragFailed() } else startPhase(1) }; return }
+            svc.down(sx, sy, 150) { ok ->
+                if (!ok) h.post { dragging = false; dragFailed() }
+                else svc.hold(150) { ok1 ->
+                    if (!ok1) h.post { dragging = false; dragFailed() } else release(fx, fy)
+                }
+            }
+        }
+
+        /** Fingerziel, damit die Teil-Mitte (bei Finger S an Stelle p0) über dem Ziel liegt; mit gelernter Korrektur. */
+        fun fingerFor(p0x: Float, p0y: Float, kx: Float, ky: Float): Pair<Float, Float>? {
+            usedTravelX = (rawX - p0x) / cs; usedTravelY = (rawY - p0y) / cs
+            usedCorrX = -predict(learnX, usedTravelX); usedCorrY = -predict(learnY, usedTravelY)
+            val tx = rawX + usedCorrX * cs; val ty = rawY + usedCorrY * cs
+            val fx = sx + (tx - p0x) / kx; val fy = sy + (ty - p0y) / ky
+            return if (fx < 2 || fx > W - 2 || fy < 2 || fy > H - 2) null else Pair(fx, fy)
+        }
+
+        /** Zum Ziel bewegen, kurz halten (Spiel zieht das Teil nach), loslassen, Landung prüfen. */
+        fun release(fx: Float, fy: Float) {
+            svc.move(fx, fy, 350) { ok ->
+                if (!ok) h.post { stopWith("Geste abgebrochen (Zielbewegung)") }
+                else svc.hold(250) { _ -> svc.up { _ -> h.post {
+                    dragging = false; dragAt = SystemClock.uptimeMillis()
+                    // Landung sofort prüfen, bevor abgeräumte Reihen verschwinden
+                    for (d in longArrayOf(150, 350)) h.postDelayed({
+                        if (!landingDone && !dragging) try { grab(); checkLanding(readCells()) } catch (_: Exception) {}
+                    }, d)
+                } } }
+            }
         }
 
         fun stopWith(msg: String) {
@@ -536,7 +618,7 @@ class HelperService : Service() {
             if (decided || busy) return
             busy = true
             wh.post {
-                val raw = try { grab(); findFloating() } catch (e: Exception) { null }
+                val raw = try { grab(); findFloating(pc) } catch (e: Exception) { null }
                 h.post {
                     busy = false
                     try { evaluate(raw) } catch (e: Exception) { if (!decided) fail("Fehler: ${e.javaClass.simpleName}") }
@@ -588,22 +670,16 @@ class HelperService : Service() {
                 return
             }
             val q0 = p0!!
-            // gelernten Fehler für diese Zugstrecke vorab ausgleichen
-            usedTravelX = (rawX - q0.centerX()) / cs; usedTravelY = (rawY - q0.centerY()) / cs
-            usedCorrX = -predict(learnX, usedTravelX); usedCorrY = -predict(learnY, usedTravelY)
-            val tx = rawX + usedCorrX * cs; val ty = rawY + usedCorrY * cs
             val kx = (r.centerX() - q0.centerX()) / dxF
-            val ky = if (dyF != 0f) (r.centerY() - q0.centerY()) / dyF else kx
+            val ky = if (dyF != 0f) (r.centerY() - q0.centerY()) / dyF else (calK?.get(1) ?: kx)
             if (kx !in 0.5f..5f || ky !in 0.5f..5f) { fail("Zugverhalten nicht messbar (k=%.2f/%.2f)".format(kx, ky)); return }
-            val fx = sx + (tx - q0.centerX()) / kx
-            val fy = sy + (ty - q0.centerY()) / ky
-            if (fx < 2 || fx > W - 2 || fy < 2 || fy > H - 2) { fail("Ziel außerhalb des Bildschirms"); return }
-            decide {
-                svc.move(fx, fy, 450) { ok ->
-                    if (!ok) h.post { stopWith("Geste abgebrochen (Zielbewegung)") }
-                    else svc.hold(200) { _ -> svc.up { _ -> h.post { dragging = false; dragAt = SystemClock.uptimeMillis() } } }
-                }
-            }
+            val target = fingerFor(q0.centerX(), q0.centerY(), kx, ky)
+            if (target == null) { fail("Ziel außerhalb des Bildschirms"); return }
+            // Messung merken: beim nächsten Teil dieser Form geht es ohne Ausmessen
+            calK = if (dyF != 0f || calK == null) floatArrayOf(kx, ky) else floatArrayOf(kx, calK!![1])
+            calOff[key] = floatArrayOf((q0.centerX() - sx) / cs, (q0.centerY() - sy) / cs)
+            saveLearning()
+            decide { release(target.first, target.second) }
         }
     }
 
@@ -615,26 +691,43 @@ class HelperService : Service() {
         h.postDelayed({ doDrag() }, 400)
     }
 
-    /** Nach einem Zug: wo ist das Teil wirklich gelandet? Kleine Abweichungen in die Korrektur übernehmen. */
+    /** Nach einem Zug (Brett wieder ruhig): Landung prüfen, falls das nicht schon direkt nach dem Loslassen ging. */
     private fun learn(cells: IntArray, count: Int) {
         dragAt = 0
-        val m = planned ?: return
-        val before = plannedBoard ?: return
         if (count >= plannedCount) return   // nichts gesetzt (z. B. neuer Satz) – nicht lernen
         tryIdx = 0
+        if (!landingDone) checkLanding(cells)
+    }
+
+    /**
+     * Wo ist das Teil wirklich gelandet? Abweichung (in Feldern) zusammen mit der Zugstrecke speichern.
+     * Landet eine bereits vermessene Form zweimal daneben, wird sie beim nächsten Mal neu vermessen.
+     */
+    private fun checkLanding(cells: IntArray): Boolean {
+        val m = planned ?: return false
+        val before = plannedBoard ?: return false
         val fresh = (0 until 64).filter { cells[it] == FULL && before[it] == EMPTY }
-        if (fresh.size != m.cells.size) { misses = 0; return }   // Reihe abgeräumt: Lage nicht prüfbar
+        if (fresh.size != m.cells.size) return false
         val r0 = fresh.minOf { it / 8 }; val c0 = fresh.minOf { it % 8 }
         val shape = fresh.map { (it / 8 - r0) * 8 + (it % 8 - c0) }.toSet()
-        if (shape != m.cells.map { it[0] * 8 + it[1] }.toSet()) return
+        if (shape != m.cells.map { it[0] * 8 + it[1] }.toSet()) return false
+        landingDone = true
         val dr = r0 - m.r; val dc = c0 - m.c
         // tatsächlicher Fehler = Landestelle minus Zielpunkt, auf den gezielt wurde
         addSample(learnX, usedTravelX, dc - usedCorrX)
         addSample(learnY, usedTravelY, dr - usedCorrY)
+        if (dr == 0 && dc == 0) {
+            misses = 0; fastMiss.remove(lastDragKey)
+        } else {
+            misses++
+            if (lastDragFast) {
+                val n = (fastMiss[lastDragKey] ?: 0) + 1
+                if (n >= 2) { calOff.remove(lastDragKey); fastMiss.remove(lastDragKey) } else fastMiss[lastDragKey] = n
+            }
+            if (misses >= 6) { misses = 0; pauseWith("Automatik pausiert: Teile landen mehrmals daneben") }
+        }
         saveLearning()
-        if (dr == 0 && dc == 0) { misses = 0; return }
-        misses++
-        if (misses >= 6) { misses = 0; pauseWith("Automatik pausiert: Teile landen mehrmals daneben") }
+        return true
     }
 
     private fun addSample(l: ArrayList<FloatArray>, travel: Float, err: Float) {
@@ -653,19 +746,31 @@ class HelperService : Service() {
         return (me + b * (travel - mt)).toFloat().coerceIn(-3f, 3f)
     }
 
+    // Gespeichert unter neuen Namen (v2): ältere Werte stammen aus der Zeit, als der Schatten des
+    // Spiels die Messung verfälscht hat, und werden deshalb nicht übernommen.
     private fun loadLearning() {
-        fun parse(k: String, l: ArrayList<FloatArray>) {
-            l.clear()
-            prefs().getString(k, "")!!.split(';').filter { it.contains(':') }.forEach {
-                val (t, e) = it.split(':'); l.add(floatArrayOf(t.toFloat(), e.toFloat()))
+        try {
+            fun parse(k: String, l: ArrayList<FloatArray>) {
+                l.clear()
+                prefs().getString(k, "")!!.split(';').filter { it.contains(':') }.forEach {
+                    val (t, e) = it.split(':'); l.add(floatArrayOf(t.toFloat(), e.toFloat()))
+                }
             }
-        }
-        parse("learnX", learnX); parse("learnY", learnY)
+            parse("learnX2", learnX); parse("learnY2", learnY)
+            calOff.clear()
+            prefs().getString("calOff2", "")!!.split(';').filter { it.contains('=') }.forEach {
+                val (k, v) = it.split('='); val (a, b) = v.split(':'); calOff[k] = floatArrayOf(a.toFloat(), b.toFloat())
+            }
+            calK = prefs().getString("calK2", "")!!.takeIf { it.contains(':') }?.split(':')?.let { floatArrayOf(it[0].toFloat(), it[1].toFloat()) }
+        } catch (_: Exception) { learnX.clear(); learnY.clear(); calOff.clear(); calK = null }
     }
 
     private fun saveLearning() {
         fun str(l: List<FloatArray>) = l.joinToString(";") { "${it[0]}:${it[1]}" }
-        prefs().edit().putString("learnX", str(learnX)).putString("learnY", str(learnY)).apply()
+        prefs().edit().putString("learnX2", str(learnX)).putString("learnY2", str(learnY))
+            .putString("calOff2", calOff.entries.joinToString(";") { "${it.key}=${it.value[0]}:${it.value[1]}" })
+            .putString("calK2", calK?.let { "${it[0]}:${it[1]}" } ?: "")
+            .apply()
     }
 
     // ---------- Fehlerbild ----------
