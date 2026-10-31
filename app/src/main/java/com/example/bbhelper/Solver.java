@@ -34,6 +34,12 @@ public final class Solver {
     public static double W_MC = 70.0;    // Gewicht der Wahrscheinlichkeit, dass ein zufälliger nächster Satz noch passt
     public static int K_FINAL = 40;      // so viele Endstellungen werden per Simulation geprüft
     public static int NODE_BUDGET = 4000;
+    // Punkte-Strategie: Combo halten (in jedem Satz mindestens eine Reihe), möglichst oft alles leer räumen
+    public static double W_COMBO = 40.0;     // je Zug, der mindestens eine Reihe/Spalte abräumt
+    public static double W_SETCLEAR = 150.0; // Satz hat mindestens eine Reihe abgeräumt (Combo bleibt erhalten)
+    public static double W_MULTI = 15.0;     // Zusatz für mehrere Reihen auf einmal (quadratisch)
+    public static double W_ALLCLEAR = 600.0; // Brett komplett leer geräumt
+    public static double W_NEXT = 60.0;      // Wahrscheinlichkeit, dass der nächste Satz wieder abräumen kann
 
     private static final long[] ROW = new long[8];
     private static final long[] COL = new long[8];
@@ -189,7 +195,13 @@ public final class Solver {
     }
 
     private static double eval(long b, int lines, int unplaced, boolean full) {
+        return eval(b, lines, 0, 0, 0, unplaced, full);
+    }
+
+    private static double eval(long b, int lines, int clearMoves, int multi, int allClears, int unplaced, boolean full) {
         double s = W_LINE * lines - 1e6 * unplaced - W_FILL * Long.bitCount(b);
+        s += W_COMBO * clearMoves + W_MULTI * multi + W_ALLCLEAR * allClears;
+        if (clearMoves > 0) s += W_SETCLEAR;
         long e = ~b;
         int trans = 0;
         for (int i = 0; i < 64; i++) {
@@ -213,7 +225,26 @@ public final class Solver {
 
     private static final class State {
         final long b; final int lines; final int[] order; final int[] pos; double score;
+        int clearMoves, multi, allClears;
         State(long b, int lines, int[] order, int[] pos) { this.b = b; this.lines = lines; this.order = order; this.pos = pos; }
+    }
+
+    /** Anteil der Stichproben-Sätze, bei denen mindestens ein Teil sofort eine Reihe/Spalte abräumen kann. */
+    private static double nextComboRate(long b) {
+        int ok = 0;
+        for (int t = 0; t < NT; t++) {
+            boolean hit = false;
+            for (int k = 0; k < 3 && !hit; k++)
+                for (long m : TRIPLES[t][k]) {
+                    if ((m & b) != 0) continue;
+                    long nb = b | m;
+                    for (int i = 0; i < 8 && !hit; i++)
+                        if ((nb & ROW[i]) == ROW[i] || (nb & COL[i]) == COL[i]) hit = true;
+                    if (hit) break;
+                }
+            if (hit) ok++;
+        }
+        return ok / (double) NT;
     }
 
     private static int[] append(int[] a, int v) {
@@ -296,14 +327,18 @@ public final class Solver {
                             if ((nb & COL[i]) == COL[i]) { clear |= COL[i]; cl++; }
                         }
                         nb &= ~clear;
-                        next.add(new State(nb, st.lines + cl, append(st.order, pi), append(st.pos, where[pi][j])));
+                        State ns = new State(nb, st.lines + cl, append(st.order, pi), append(st.pos, where[pi][j]));
+                        ns.clearMoves = st.clearMoves + (cl > 0 ? 1 : 0);
+                        ns.multi = st.multi + (cl > 1 ? cl * cl : 0);
+                        ns.allClears = st.allClears + (cl > 0 && nb == 0 ? 1 : 0);
+                        next.add(ns);
                     }
                     if (!any) {
                         double sc = eval(st.b, st.lines, n - k, false);
                         if (sc > bestPartialScore) { bestPartialScore = sc; bestPartial = st; }
                     }
                 }
-                for (State st : next) st.score = eval(st.b, st.lines, 0, false);
+                for (State st : next) st.score = eval(st.b, st.lines, st.clearMoves, st.multi, st.allClears, 0, false);
                 if (k == n - 1) {
                     for (State st : next) {
                         State old = finals.get(st.b);
@@ -327,7 +362,7 @@ public final class Solver {
             if (top.size() > K_FINAL) top = new ArrayList<>(top.subList(0, K_FINAL));
             double bs = Double.NEGATIVE_INFINITY;
             for (State st : top) {
-                double sc = st.score + W_MC * survivalRate(st.b);
+                double sc = st.score + W_MC * survivalRate(st.b) + W_NEXT * nextComboRate(st.b);
                 if (sc > bs) { bs = sc; best = st; }
             }
         } else {
