@@ -16,6 +16,7 @@ import android.media.projection.MediaProjectionManager
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.os.SystemClock
 import android.provider.MediaStore
 import android.view.Gravity
 import android.view.View
@@ -69,7 +70,27 @@ class HelperService : Service() {
     private var analyzedCount = 0
     private var lastKey = ""
     private var stable = 0
-    private var saveNext = false   // nächsten Scan als Bild speichern (nach Tippen auf "Zug")
+    private var saveNext = false
+
+    // ---- Automatik-Modus (nur aktiv, wenn auf dem Startbildschirm "Automatisch spielen" gewählt) ----
+    private var auto = false
+    private var paused = false
+    private val trayBox = arrayOfNulls<RectF>(3)    // Lage der Teile in der Ablage (Bildschirm-Pixel)
+    private var planned: Solver.Move? = null
+    private var plannedBoard: IntArray? = null
+    private var plannedCount = 0
+    private var grabAt: RectF? = null
+    private var dragging = false
+    private var dragAt = 0L                          // Zeitpunkt der letzten Geste, 0 = keine offen
+    private var usedOffX = 0f; private var usedOffY = 0f; private var usedRows = 1
+    private var tryIdx = 0                           // Fehlversuche mit diesem Zug
+    private var misses = 0                           // Teile hintereinander an falscher Stelle gelandet
+    // Versatz Teil-Mitte minus Finger beim Ziehen, in Brettfeldern; wird nach jedem Zug nachgelernt.
+    // Getrennt nach Höhe des Teils (1-5 Reihen), weil Spiele das Teil unterschiedlich verankern.
+    private var offX = 0f
+    private val offY = FloatArray(6) { -1.5f }
+    private val learnedY = BooleanArray(6)
+    private val TRY = floatArrayOf(0f, 1f, -1f, 2f, -2f, 3f)   // Zusatzversatz bei Fehlversuchen (Felder)   // nächsten Scan als Bild speichern (nach Tippen auf "Zug")
 
     private val EMPTY = 0
     private val FULL = 1
@@ -131,10 +152,15 @@ class HelperService : Service() {
         wm.addView(ov, lp(-1, -1, 8 or 16 or 256 or 512).apply {
             layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
         })
+        auto = i.getBooleanExtra("auto", false)
+        if (auto) loadOffsets()
         btn = TextView(this).apply {
-            text = "↻ Zug"; setTextColor(Color.WHITE); setPadding(32, 20, 32, 20)
+            text = if (auto) "⏸ Auto" else "↻ Zug"; setTextColor(Color.WHITE); setPadding(32, 20, 32, 20)
             setBackgroundColor(0xCC2D3280.toInt())
-            setOnClickListener { analyzedKey = null; analyzedCount = 0; stable = STABLE_NEW; saveNext = true }  // neu berechnen + Scan speichern
+            setOnClickListener {
+                if (auto) togglePause()
+                else { analyzedKey = null; analyzedCount = 0; stable = STABLE_NEW; saveNext = true }  // neu berechnen + Scan speichern
+            }
             setOnLongClickListener { stopSelf(); true }  // lange drücken = beenden
         }
         wm.addView(btn, lp(-2, -2, 8).apply { gravity = Gravity.TOP or Gravity.START; y = 300 })
@@ -224,6 +250,7 @@ class HelperService : Service() {
         val t = cs * TS                                   // erwartete Feldgröße in der Ablage (px)
         val er = max(2, (6f * W / 1080f).roundToInt())    // Mindestdicke: dünne Rahmenlinien zählen nicht
         return (0..2).map { s ->
+            trayBox[s] = null
             val x0 = W * s / 3; val x1 = W * (s + 1) / 3
             val y0 = (TY0 * H).toInt(); val y1 = (TY1 * H).toInt()
             // Hintergrund = Median aller Farbwerte im Feld (Teile sind nur ein kleiner Teil der Fläche)
@@ -244,6 +271,7 @@ class HelperService : Service() {
                 val left = (mnX - er - 2).toFloat(); val top = (mnY - er - 2).toFloat()
                 val w = (mxX - mnX + 2 * er + 4).toFloat(); val ph = (mxY - mnY + 2 * er + 4).toFloat()
                 val fw = w / t; val fh = ph / t
+                trayBox[s] = RectF(left, top, left + w, top + ph)
                 if (abs(fw - fw.roundToInt()) <= 0.3f && abs(fh - fh.roundToInt()) <= 0.3f) {
                     val cols = fw.roundToInt().coerceIn(1, 5)
                     val rows = fh.roundToInt().coerceIn(1, 5)
@@ -270,6 +298,7 @@ class HelperService : Service() {
     private fun tick() {
         grab()
         if (!hasFrame) return
+        if (auto && dragging) return   // Geste läuft gerade
         val tray = readTray()
         val count = tray.count { it.isNotEmpty() }
         val sig = tray.joinToString("|") { cells -> cells.joinToString(",") { "${it[0]}${it[1]}" } }
@@ -277,19 +306,26 @@ class HelperService : Service() {
         val board = cells.joinToString("")
         val key = "$board/$sig"
         if (key == lastKey) stable++ else { stable = 0; lastKey = key }
-        if (key == analyzedKey) return
+        if (key == analyzedKey) {
+            // Automatik: nach der Geste hat sich nichts geändert -> Teil wurde nicht gesetzt
+            if (auto && !paused && dragAt > 0 && SystemClock.uptimeMillis() - dragAt > 3000) dragFailed()
+            return
+        }
 
         if (count == 0) {
             // alle Teile gesetzt: Hinweis weg, auf neuen Satz warten
             if (ov.items.isNotEmpty()) { ov.items.clear(); ov.invalidate() }
+            if (auto && dragAt > 0 && stable >= STABLE_FEWER) learn(cells, count)
             return
         }
         // Teil fehlt, Brett aber unverändert: wird gerade gezogen -> Hinweis stehen lassen
         if (count < analyzedCount && board == analyzedBoard) return
         val need = if (count < analyzedCount) STABLE_FEWER else STABLE_NEW
         if (stable < need) return
+        if (auto && dragAt > 0) learn(cells, count)
         analyzedKey = key; analyzedBoard = board; analyzedCount = count
         show(tray, cells)
+        if (auto) planDrag(cells, count)
     }
 
     /** Prüft, ob der Zug auf dem gescannten Brett wirklich passt (alle Zielfelder sicher leer). */
@@ -306,6 +342,7 @@ class HelperService : Service() {
             res = Solver.solve(BooleanArray(64) { cells[it] != EMPTY }, pieces)
         ov.items.clear()
         val m = res?.moves?.firstOrNull()
+        planned = m?.takeIf { fits(cells, it) }
         var problem: String? = null
         when {
             res == null -> problem = "Keine Teile erkannt"
@@ -330,6 +367,106 @@ class HelperService : Service() {
             saveNext = false
             saveDebug(problem ?: "manuell", pieces, cells, m?.takeIf { fits(cells, it) })
         }
+    }
+
+    // ---------- Automatik ----------
+
+    private fun prefs() = getSharedPreferences("auto", Context.MODE_PRIVATE)
+
+    private fun loadOffsets() {
+        val p = prefs()
+        offX = p.getFloat("offX", 0f)
+        for (r in 1..5) { offY[r] = p.getFloat("offY$r", -1.5f); learnedY[r] = p.getBoolean("learned$r", false) }
+    }
+
+    private fun saveOffsets() {
+        val e = prefs().edit().putFloat("offX", offX)
+        for (r in 1..5) e.putFloat("offY$r", offY[r]).putBoolean("learned$r", learnedY[r])
+        e.apply()
+    }
+
+    private fun togglePause() {
+        paused = !paused
+        btn.text = if (paused) "▶ Auto" else "⏸ Auto"
+        if (paused) toast("Automatik pausiert – antippen zum Weiterspielen")
+        else { tryIdx = 0; misses = 0; dragAt = 0; analyzedKey = null; analyzedCount = 0; stable = STABLE_NEW }
+    }
+
+    private fun pauseWith(msg: String) {
+        if (!paused) togglePause()
+        toast(msg)
+    }
+
+    private fun planDrag(cells: IntArray, count: Int) {
+        val m = planned ?: return
+        if (paused) return
+        val box = trayBox[m.piece] ?: return
+        plannedBoard = cells; plannedCount = count; grabAt = RectF(box)
+        h.postDelayed({ doDrag() }, 500)
+    }
+
+    private fun doDrag() {
+        if (!running || paused || dragging) return
+        val m = planned ?: return
+        val box = grabAt ?: return
+        val svc = AutoService.inst
+        if (svc == null) { pauseWith("Automatik: Bedienungshilfe \"Block-Helfer Automatik\" ist nicht eingeschaltet"); return }
+        val bx = BX * W; val by = BY * H; val cs = BS * W / 8
+        val rows = m.cells.maxOf { it[0] } + 1; val cols = m.cells.maxOf { it[1] } + 1
+        // Ziel: Mitte des Teils auf dem Brett; Finger = Ziel minus Versatz (Teil schwebt über dem Finger)
+        val tcx = bx + (m.c + cols / 2f) * cs; val tcy = by + (m.r + rows / 2f) * cs
+        usedRows = rows.coerceIn(1, 5)
+        usedOffX = offX; usedOffY = offY[usedRows] + TRY[tryIdx]
+        val fx = (tcx - usedOffX * cs).coerceIn(5f, W - 5f)
+        val fy = (tcy - usedOffY * cs).coerceIn(5f, H - 5f)
+        dragging = true
+        svc.drag(box.centerX(), box.centerY(), fx, fy) { ok ->
+            h.post {
+                dragging = false
+                dragAt = SystemClock.uptimeMillis()
+                if (!ok) dragFailed()
+            }
+        }
+    }
+
+    /** Das Teil liegt nach der Geste noch in der Ablage: anders versetzt nochmal probieren. */
+    private fun dragFailed() {
+        dragAt = 0
+        tryIdx++
+        if (tryIdx >= TRY.size) { tryIdx = 0; pauseWith("Automatik pausiert: Teil ließ sich nicht setzen"); return }
+        h.postDelayed({ doDrag() }, 300)
+    }
+
+    /** Nach einem Zug: wo ist das Teil wirklich gelandet? Abweichung in den Versatz übernehmen. */
+    private fun learn(cells: IntArray, count: Int) {
+        dragAt = 0
+        val m = planned ?: return
+        val before = plannedBoard ?: return
+        if (count >= plannedCount) return   // nichts gesetzt (z. B. neuer Satz) – nicht lernen
+        tryIdx = 0
+        val fresh = (0 until 64).filter { cells[it] == FULL && before[it] == EMPTY }
+        if (fresh.size != m.cells.size) { misses = 0; return }   // Reihe abgeräumt: Lage nicht prüfbar
+        val r0 = fresh.minOf { it / 8 }; val c0 = fresh.minOf { it % 8 }
+        val shape = fresh.map { (it / 8 - r0) * 8 + (it % 8 - c0) }.toSet()
+        if (shape != m.cells.map { it[0] * 8 + it[1] }.toSet()) return
+        val dr = r0 - m.r; val dc = c0 - m.c
+        if (dr == 0 && dc == 0) {
+            misses = 0
+            if (!learnedY[usedRows] || offY[usedRows] != usedOffY || offX != usedOffX) {
+                offY[usedRows] = usedOffY; offX = usedOffX
+                learnedY[usedRows] = true
+                for (r in 1..5) if (!learnedY[r]) offY[r] = usedOffY
+                saveOffsets()
+            }
+            return
+        }
+        // falsch gelandet: Versatz korrigieren (Teil landete dr/dc Felder daneben)
+        offX = usedOffX + dc; offY[usedRows] = usedOffY + dr
+        learnedY[usedRows] = true
+        for (r in 1..5) if (!learnedY[r]) offY[r] = offY[usedRows]
+        saveOffsets()
+        misses++
+        if (misses >= 4) { misses = 0; pauseWith("Automatik pausiert: Teile landen mehrmals daneben") }
     }
 
     // ---------- Fehlerbild ----------

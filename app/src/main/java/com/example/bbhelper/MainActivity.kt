@@ -23,6 +23,11 @@ class MainActivity : Activity() {
     private lateinit var overlayRow: TextView
     private lateinit var notifyRow: TextView
     private lateinit var startBtn: Button
+    private lateinit var accRow: TextView
+    private lateinit var accHelp: LinearLayout
+    private lateinit var modeHint: TextView
+    private lateinit var modeAuto: TextView
+    private var auto = false
 
     private val dp get() = resources.displayMetrics.density
     private fun Int.px() = (this * dp).toInt()
@@ -61,6 +66,18 @@ class MainActivity : Activity() {
             gravity = Gravity.CENTER; setPadding(0, 0, 0, 24.px())
         })
 
+        // Karte: Modus
+        auto = getSharedPreferences("auto", MODE_PRIVATE).getBoolean("mode_auto", false)
+        val mode = card()
+        mode.addView(text("Modus", 17f, Color.WHITE, true))
+        val modes = LinearLayout(this).apply { setPadding(0, 12.px(), 0, 0) }
+        modeHint = modeTile("💡", "Nur Hinweise", "Zeigt den Zug, du ziehst selbst") { setMode(false) }
+        modeAuto = modeTile("🤖", "Automatisch", "Der Helfer zieht die Teile selbst") { setMode(true) }
+        modes.addView(modeHint, LinearLayout.LayoutParams(0, -2, 1f).apply { rightMargin = 6.px() })
+        modes.addView(modeAuto, LinearLayout.LayoutParams(0, -2, 1f).apply { leftMargin = 6.px() })
+        mode.addView(modes)
+        root.addView(mode)
+
         // Karte: Berechtigungen
         val perm = card()
         perm.addView(text("Berechtigungen", 17f, Color.WHITE, true))
@@ -73,6 +90,30 @@ class MainActivity : Activity() {
             setOnClickListener { requestNotify() }
         }
         perm.addView(overlayRow); perm.addView(notifyRow)
+        accRow = text("", 15f, Color.WHITE).apply {
+            setPadding(0, 10.px(), 0, 0)
+            setOnClickListener { openAccessibility() }
+        }
+        perm.addView(accRow)
+        accHelp = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(12.px(), 10.px(), 12.px(), 12.px())
+            background = round(0x22000000, 12)
+        }
+        accHelp.addView(text("So schaltest du die Automatik frei:", 13f, Color.WHITE, true))
+        accHelp.addView(text(
+            "1. \"App-Infos öffnen\" antippen, oben rechts auf ⋮ und \"Eingeschränkte Einstellungen zulassen\" wählen " +
+            "(nur nötig, wenn Android die Bedienungshilfe sperrt).\n" +
+            "2. \"Bedienungshilfen öffnen\" antippen, \"Block-Helfer Automatik\" auswählen und einschalten.",
+            13f, 0xFFE0E7FF.toInt()).apply { setPadding(0, 6.px(), 0, 8.px()) })
+        val accBtns = LinearLayout(this)
+        accBtns.addView(smallBtn("App-Infos öffnen") {
+            startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName")))
+        }, LinearLayout.LayoutParams(0, 40.px(), 1f).apply { rightMargin = 4.px() })
+        accBtns.addView(smallBtn("Bedienungshilfen öffnen") { openAccessibility() },
+            LinearLayout.LayoutParams(0, 40.px(), 1f).apply { leftMargin = 4.px() })
+        accHelp.addView(accBtns)
+        perm.addView(accHelp, LinearLayout.LayoutParams(-1, -2).apply { topMargin = 8.px() })
         perm.addView(text("Beim Start fragt Android zusätzlich nach der Bildschirmaufnahme – bitte \"Gesamter Bildschirm\" wählen.", 13f, 0xFFA5B4FC.toInt()).apply {
             setPadding(0, 12.px(), 0, 0)
         })
@@ -86,7 +127,9 @@ class MainActivity : Activity() {
             "2" to "Der farbige Rahmen zeigt, wo das Teil hin soll. Der Balken unter der Ablage zeigt, welches Teil.",
             "3" to "Nach jedem Zug wird das Brett neu gescannt und der nächste Hinweis erscheint.",
             "↻" to "Antippen: neu berechnen und Scan in der Galerie (BlockHelfer) speichern.",
-            "✕" to "\"↻ Zug\" lange drücken beendet den Helfer."
+            "🤖" to "Automatik: Der Helfer zieht selbst. Die ersten Züge können danebengehen, bis er den Versatz gelernt hat.",
+            "⏸" to "In der Automatik pausiert \"⏸ Auto\" das Spielen, nochmal antippen spielt weiter.",
+            "✕" to "Den Knopf lange drücken beendet den Helfer."
         ).forEach { (n, t) -> help.addView(step(n, t)) }
         root.addView(help)
 
@@ -126,6 +169,27 @@ class MainActivity : Activity() {
             LinearLayout.LayoutParams(0, -2, 1f))
     }
 
+    private fun modeTile(icon: String, title: String, sub: String, click: () -> Unit) = TextView(this).apply {
+        text = "$icon\n$title\n$sub"; textSize = 13f; setTextColor(Color.WHITE)
+        gravity = Gravity.CENTER; setPadding(8.px(), 14.px(), 8.px(), 14.px())
+        setOnClickListener { click() }
+    }
+
+    private fun smallBtn(t: String, click: () -> Unit) = Button(this).apply {
+        text = t; textSize = 12f; isAllCaps = false; setTextColor(Color.WHITE)
+        background = round(0x556366F1, 10); stateListAnimator = null
+        setPadding(4.px(), 0, 4.px(), 0)
+        setOnClickListener { click() }
+    }
+
+    private fun setMode(a: Boolean) {
+        auto = a
+        getSharedPreferences("auto", MODE_PRIVATE).edit().putBoolean("mode_auto", a).apply()
+        refresh()
+    }
+
+    private fun openAccessibility() = startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+
     override fun onResume() {
         super.onResume()
         refresh()
@@ -136,6 +200,15 @@ class MainActivity : Activity() {
         overlayRow.text = if (ov) "✅  Über anderen Apps anzeigen" else "⚠️  Über anderen Apps anzeigen – tippen zum Erlauben"
         val nt = Build.VERSION.SDK_INT < 33 ||
             checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
+        for ((v, on) in listOf(modeHint to !auto, modeAuto to auto)) {
+            v.background = if (on) round(0x666366F1, 14, 0xFFA5B4FC.toInt()) else round(0x14FFFFFF, 14, 0x22FFFFFF)
+            v.alpha = if (on) 1f else 0.6f
+        }
+        val acc = AutoService.isEnabled(this)
+        accRow.visibility = if (auto) View.VISIBLE else View.GONE
+        accRow.text = if (acc) "✅  Bedienungshilfe für Automatik" else "⚠️  Bedienungshilfe für Automatik – noch nicht eingeschaltet"
+        accHelp.visibility = if (auto && !acc) View.VISIBLE else View.GONE
+        startBtn.text = if (auto) "▶  Automatisch spielen" else "▶  Helfer starten"
         notifyRow.text = if (nt) "✅  Benachrichtigungen" else "⚠️  Benachrichtigungen – tippen zum Erlauben (optional)"
     }
 
@@ -158,6 +231,11 @@ class MainActivity : Activity() {
             requestOverlay()
             return
         }
+        if (auto && !AutoService.isEnabled(this)) {
+            android.widget.Toast.makeText(this, "Bitte zuerst die Bedienungshilfe \"Block-Helfer Automatik\" einschalten", android.widget.Toast.LENGTH_LONG).show()
+            refresh()
+            return
+        }
         val mpm = getSystemService(MediaProjectionManager::class.java)
         startActivityForResult(mpm.createScreenCaptureIntent(), 1)
     }
@@ -165,7 +243,7 @@ class MainActivity : Activity() {
     @Deprecated("Deprecated in Java")
     override fun onActivityResult(rq: Int, rc: Int, d: Intent?) {
         if (rc == RESULT_OK && d != null) {
-            startForegroundService(Intent(this, HelperService::class.java).putExtra("code", rc).putExtra("data", d))
+            startForegroundService(Intent(this, HelperService::class.java).putExtra("code", rc).putExtra("data", d).putExtra("auto", auto))
             moveTaskToBack(true)
         }
     }

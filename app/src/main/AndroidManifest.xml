@@ -12,5 +12,13 @@
         </activity>
         <service android:name=".HelperService" android:exported="false"
             android:foregroundServiceType="mediaProjection" />
+        <service android:name=".AutoService" android:exported="true"
+            android:label="Block-Helfer Automatik"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data android:name="android.accessibilityservice" android:resource="@xml/auto_service" />
+        </service>
     </application>
 </manifest>

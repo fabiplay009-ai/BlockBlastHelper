@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="auto_desc">Block-Helfer Automatik: zieht im Modus \"Automatisch spielen\" die Teile selbst an die berechnete Stelle. Liest keine Inhalte anderer Apps.</string>
+</resources>
