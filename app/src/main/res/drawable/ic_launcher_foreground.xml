@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- App-Icon (Vordergrund): 3x3-Spielfeld in den App-Farben, weiße Hinweis-Rahmen in L-Form, Funkel-Stern -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp" android:height="108dp"
+    android:viewportWidth="108" android:viewportHeight="108">
+    <path android:fillColor="#FF2F7BF5" android:pathData="M36.25,35.25 h6.5 a3,3 0 0 1 3,3 v6.5 a3,3 0 0 1 -3,3 h-6.5 a3,3 0 0 1 -3,-3 v-6.5 a3,3 0 0 1 3,-3 z" />
+    <path android:fillColor="#40FFFFFF" android:pathData="M36.55,36.75 h5.9 a1.3,1.3 0 0 1 1.3,1.3 v0 a1.3,1.3 0 0 1 -1.3,1.3 h-5.9 a1.3,1.3 0 0 1 -1.3,-1.3 v-0 a1.3,1.3 0 0 1 1.3,-1.3 z" />
+    <path android:fillColor="#FF2F7BF5" android:pathData="M50.75,35.25 h6.5 a3,3 0 0 1 3,3 v6.5 a3,3 0 0 1 -3,3 h-6.5 a3,3 0 0 1 -3,-3 v-6.5 a3,3 0 0 1 3,-3 z" />
+    <path android:fillColor="#40FFFFFF" android:pathData="M51.05,36.75 h5.9 a1.3,1.3 0 0 1 1.3,1.3 v0 a1.3,1.3 0 0 1 -1.3,1.3 h-5.9 a1.3,1.3 0 0 1 -1.3,-1.3 v-0 a1.3,1.3 0 0 1 1.3,-1.3 z" />
+    <path android:fillColor="#FF0FA77A" android:pathData="M36.25,49.75 h6.5 a3,3 0 0 1 3,3 v6.5 a3,3 0 0 1 -3,3 h-6.5 a3,3 0 0 1 -3,-3 v-6.5 a3,3 0 0 1 3,-3 z" />
+    <path android:fillColor="#40FFFFFF" android:pathData="M36.55,51.25 h5.9 a1.3,1.3 0 0 1 1.3,1.3 v0 a1.3,1.3 0 0 1 -1.3,1.3 h-5.9 a1.3,1.3 0 0 1 -1.3,-1.3 v-0 a1.3,1.3 0 0 1 1.3,-1.3 z" />
+    <path android:fillColor="#FF0FA77A" android:pathData="M36.25,64.25 h6.5 a3,3 0 0 1 3,3 v6.5 a3,3 0 0 1 -3,3 h-6.5 a3,3 0 0 1 -3,-3 v-6.5 a3,3 0 0 1 3,-3 z" />
+    <path android:fillColor="#40FFFFFF" android:pathData="M36.55,65.75 h5.9 a1.3,1.3 0 0 1 1.3,1.3 v0 a1.3,1.3 0 0 1 -1.3,1.3 h-5.9 a1.3,1.3 0 0 1 -1.3,-1.3 v-0 a1.3,1.3 0 0 1 1.3,-1.3 z" />
+    <path android:fillColor="#FFE8890C" android:pathData="M50.75,64.25 h6.5 a3,3 0 0 1 3,3 v6.5 a3,3 0 0 1 -3,3 h-6.5 a3,3 0 0 1 -3,-3 v-6.5 a3,3 0 0 1 3,-3 z" />
+    <path android:fillColor="#40FFFFFF" android:pathData="M51.05,65.75 h5.9 a1.3,1.3 0 0 1 1.3,1.3 v0 a1.3,1.3 0 0 1 -1.3,1.3 h-5.9 a1.3,1.3 0 0 1 -1.3,-1.3 v-0 a1.3,1.3 0 0 1 1.3,-1.3 z" />
+    <path android:fillColor="#FFE8890C" android:pathData="M65.25,64.25 h6.5 a3,3 0 0 1 3,3 v6.5 a3,3 0 0 1 -3,3 h-6.5 a3,3 0 0 1 -3,-3 v-6.5 a3,3 0 0 1 3,-3 z" />
+    <path android:fillColor="#40FFFFFF" android:pathData="M65.55,65.75 h5.9 a1.3,1.3 0 0 1 1.3,1.3 v0 a1.3,1.3 0 0 1 -1.3,1.3 h-5.9 a1.3,1.3 0 0 1 -1.3,-1.3 v-0 a1.3,1.3 0 0 1 1.3,-1.3 z" />
+    <path android:strokeColor="#FFFFFFFF" android:strokeWidth="1.8" android:fillColor="#00000000" android:pathData="M65.55,36.15 h5.9 a2.4,2.4 0 0 1 2.4,2.4 v5.9 a2.4,2.4 0 0 1 -2.4,2.4 h-5.9 a2.4,2.4 0 0 1 -2.4,-2.4 v-5.9 a2.4,2.4 0 0 1 2.4,-2.4 z" />
+    <path android:strokeColor="#FFFFFFFF" android:strokeWidth="1.8" android:fillColor="#00000000" android:pathData="M51.05,50.65 h5.9 a2.4,2.4 0 0 1 2.4,2.4 v5.9 a2.4,2.4 0 0 1 -2.4,2.4 h-5.9 a2.4,2.4 0 0 1 -2.4,-2.4 v-5.9 a2.4,2.4 0 0 1 2.4,-2.4 z" />
+    <path android:strokeColor="#FFFFFFFF" android:strokeWidth="1.8" android:fillColor="#00000000" android:pathData="M65.55,50.65 h5.9 a2.4,2.4 0 0 1 2.4,2.4 v5.9 a2.4,2.4 0 0 1 -2.4,2.4 h-5.9 a2.4,2.4 0 0 1 -2.4,-2.4 v-5.9 a2.4,2.4 0 0 1 2.4,-2.4 z" />
+    <path android:fillColor="#FFFDE68A" android:pathData="M75,25.5 Q76,30 80.5,31 Q76,32 75,36.5 Q74,32 69.5,31 Q74,30 75,25.5 Z" />
+</vector>
