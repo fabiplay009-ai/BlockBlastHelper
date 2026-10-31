@@ -398,8 +398,8 @@ class HelperService : Service() {
      */
     private fun findFloating(skip: Int): RectF? {
         val cs = BS * W / 8
-        val top = (BY * H + 8 * cs + 6).toInt(); val bot = (H * 0.93f).toInt()
-        val bar0 = TY1 * H - 32; val bar1 = TY1 * H - 6      // Markierungsbalken des Hinweises
+        // von unter dem Brett bis knapp über den Markierungsbalken – Werbung darunter bleibt draußen
+        val top = (BY * H + 8 * cs + 6).toInt(); val bot = (TY1 * H - 34).toInt()
         val rs = ArrayList<Int>(); val gs = ArrayList<Int>(); val bs = ArrayList<Int>()
         for (y in top until bot step 12) for (x in 4 until W - 4 step 12) {
             val p = rgb(x, y); rs.add(p[0]); gs.add(p[1]); bs.add(p[2])
@@ -412,7 +412,6 @@ class HelperService : Service() {
         val other = (0..2).filter { it != skip }.mapNotNull { trayBox[it] }.map { RectF(it).apply { inset(-8f, -8f) } }
         var mnX = Int.MAX_VALUE; var mnY = Int.MAX_VALUE; var mxX = -1; var mxY = -1
         for (y in top until bot step 4) {
-            if (y >= bar0 && y <= bar1) continue
             for (x in 4 until W - 4 step 4) {
                 if (other.any { it.contains(x.toFloat(), y.toFloat()) }) continue
                 if (on(x, y) && on(x - er, y) && on(x + er, y) && on(x, y - er) && on(x, y + er)) {
