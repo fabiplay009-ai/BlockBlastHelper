@@ -41,7 +41,8 @@ class HelperService : Service() {
     private val STABLE_NEW = 2    // so viele gleiche Bilder hintereinander, bevor neu gerechnet wird
     private val STABLE_FEWER = 3  // ... wenn ein Teil fehlt (könnte gerade gezogen werden)
     private val MIND = 50         // Teil erkannt, wenn Farbabstand zum Ablage-Hintergrund größer ist
-    private val NEED = 5          // Feld belegt, wenn mind. so viele von 9 Stichproben "Teil" sind
+    private val NEED = 8          // Feld belegt, wenn mind. so viele von 25 Stichproben "Teil" sind
+                                  // (leere Felder: 0, volle: 16-25 – auch bei dunkel schattierten Blöcken)
     private val POLL_MS = 350L    // so oft schaut der Helfer auf die Ablage
 
     private val COL = intArrayOf(0xAA2F7BF5.toInt(), 0xAA0FA77A.toInt(), 0xAAE8890C.toInt())
@@ -252,8 +253,8 @@ class HelperService : Service() {
                         for (r in 0 until rows) for (c in 0 until cols) {
                             val cx = left + (c + .5f) * w / cols; val cy = top + (r + .5f) * ph / rows
                             var n = 0
-                            for (dx in -1..1) for (dy in -1..1)
-                                if (on((cx + dx * .25f * t).toInt(), (cy + dy * .25f * t).toInt())) n++
+                            for (dx in -2..2) for (dy in -2..2)
+                                if (on((cx + dx * .15f * t).toInt(), (cy + dy * .15f * t).toInt())) n++
                             if (n >= NEED) cells.add(intArrayOf(r, c))
                         }
                         if (!connected(cells)) cells.clear()
