@@ -469,6 +469,7 @@ class HelperService : Service() {
         System.arraycopy(fb, 0, refFb, 0, fb.size)
         val top = BY * H
         dragging = true
+        lastFloat = null
 
         fun fail(msg: String) {
             svc.up { h.post {
@@ -492,7 +493,7 @@ class HelperService : Service() {
             if (abs(dyF) < 0.15f * cs) dyF = 0f        // kein Platz: senkrecht wie waagerecht annehmen
             val f1x = sx + dxF; val f1y = sy + dyF
             svc.move(f1x, f1y, 200) { ok -> if (!ok) lost() else measure(svc, m.piece, rows, cols, 12, null) { p1 -> safe {
-                if (p1 == null) { fail("gezogenes Teil nicht gefunden (2)"); return@safe }
+                if (p1 == null) { fail("gezogenes Teil nicht gefunden (2) – $measureInfo"); return@safe }
                 // gelernten Fehler für diese Zugstrecke vorab ausgleichen
                 usedTravelX = (rawX - p0.centerX()) / cs; usedTravelY = (rawY - p0.centerY()) / cs
                 usedCorrX = -predict(learnX, usedTravelX); usedCorrY = -predict(learnY, usedTravelY)
@@ -513,23 +514,49 @@ class HelperService : Service() {
         svc.down(sx, sy, 150) { ok0 ->
             if (!ok0) lost()
             else measure(svc, m.piece, rows, cols, 12, null) { p0 -> safe {
-                if (p0 == null) fail("gezogenes Teil nicht gefunden (1)") else second(p0)
+                if (p0 == null) fail("gezogenes Teil nicht gefunden (1) – $measureInfo") else second(p0)
             } }
         }
     }
 
     /**
      * Hält den Finger ruhig und misst wiederholt (alle ~100 ms), bis das schwebende Teil zweimal
-     * hintereinander an derselben Stelle in passender Größe gefunden wird. null = nicht gefunden.
+     * hintereinander ungefähr an derselben Stelle in passender Größe gefunden wird (kleines Wippen
+     * des Teils ist erlaubt). Klappt das nicht, zählt der Mittelwert der letzten passenden Messungen.
+     * null = nicht gefunden; [measureInfo] beschreibt dann, was gesehen wurde (fürs Fehlerbild).
      */
-    private fun measure(svc: AutoService, piece: Int, rows: Int, cols: Int, tries: Int, last: RectF?, done: (RectF?) -> Unit) {
+    private var measureInfo = ""
+    private var lastFloat: RectF? = null              // zuletzt gefundene Fläche (fürs Fehlerbild)
+
+    private fun measure(svc: AutoService, piece: Int, rows: Int, cols: Int, tries: Int, last: RectF?, done: (RectF?) -> Unit,
+                        good: ArrayList<RectF> = ArrayList()) {
+        val cs = BS * W / 8
         svc.hold(100) { ok -> h.post {
-            if (!ok) { done(null); return@post }
-            val p = try { grab(); findFloating()?.takeIf { plausible(it, rows, cols) } } catch (e: Exception) { null }
-            if (p != null && last != null && abs(p.centerX() - last.centerX()) <= 4 &&
-                abs(p.centerY() - last.centerY()) <= 4 && abs(p.width() - last.width()) <= 6) { done(p); return@post }
-            if (tries <= 0) { done(null); return@post }
-            measure(svc, piece, rows, cols, tries - 1, p, done)
+            if (!ok) { measureInfo = "Geste abgebrochen"; done(null); return@post }
+            val raw = try { grab(); findFloating() } catch (e: Exception) { null }
+            val p = raw?.takeIf { plausible(it, rows, cols) }
+            lastFloat = raw
+            measureInfo = if (raw == null) "nichts gefunden" else
+                "Fläche %.2f x %.2f Felder (erwartet %d x %d), passend: %d".format(
+                    raw.width() / cs, raw.height() / cs, cols, rows, good.size + (if (p != null) 1 else 0))
+            if (p != null) {
+                good.add(p)
+                val tol = cs * 0.15f
+                if (last != null && abs(p.centerX() - last.centerX()) <= tol &&
+                    abs(p.centerY() - last.centerY()) <= tol && abs(p.width() - last.width()) <= tol) {
+                    done(RectF((p.left + last.left) / 2, (p.top + last.top) / 2, (p.right + last.right) / 2, (p.bottom + last.bottom) / 2))
+                    return@post
+                }
+            }
+            if (tries <= 0) {
+                if (good.size >= 3) {
+                    val n = good.takeLast(4)
+                    done(RectF(n.map { it.left }.average().toFloat(), n.map { it.top }.average().toFloat(),
+                        n.map { it.right }.average().toFloat(), n.map { it.bottom }.average().toFloat()))
+                } else done(null)
+                return@post
+            }
+            measure(svc, piece, rows, cols, tries - 1, p, done, good)
         } }
     }
 
@@ -643,7 +670,15 @@ class HelperService : Service() {
                 cv.drawRect(0f, TY0 * hh, w.toFloat(), TY1 * hh, p)
                 p.style = Paint.Style.FILL; p.color = Color.WHITE; p.textSize = 40f
                 p.setShadowLayer(4f, 0f, 0f, Color.BLACK)
-                cv.drawText(reason, 30f, by - 20f, p)
+                val parts = reason.split(" – ", limit = 2)
+                if (parts.size == 2) {
+                    cv.drawText(parts[0], 30f, by - 64f, p)
+                    p.textSize = 30f; cv.drawText(parts[1], 30f, by - 20f, p)
+                } else cv.drawText(reason, 30f, by - 20f, p)
+                lastFloat?.let { r ->
+                    p.clearShadowLayer(); p.style = Paint.Style.STROKE; p.strokeWidth = 5f; p.color = Color.CYAN
+                    cv.drawRect(r, p)
+                }
 
                 val v = ContentValues().apply {
                     put(MediaStore.Images.Media.DISPLAY_NAME, "blockhelfer_${System.currentTimeMillis()}.png")
