@@ -85,11 +85,16 @@ class HelperService : Service() {
     private var tryIdx = 0                           // Fehlversuche mit diesem Zug
     private var misses = 0                           // Teile hintereinander an falscher Stelle gelandet
     private var lastPieces: List<List<IntArray>> = emptyList()
-    // Feinkorrektur des Zielpunkts in Brettfeldern; wird aus der tatsächlichen Landeposition nachgelernt
-    private var corrX = 0f
-    private var corrY = 0f
+    // Selbstlernende Korrektur: nach jedem Zug wird gespeichert, wie weit (in Brettfeldern) das Teil bei
+    // welcher Zugstrecke danebenlag. Daraus wird je Richtung "Fehler = a + b * Strecke" geschätzt
+    // und beim nächsten Zug vorab ausgeglichen. Die letzten 12 Züge zählen, gespeichert über Neustarts.
+    private val learnX = ArrayList<FloatArray>()
+    private val learnY = ArrayList<FloatArray>()
+    private var refFb = ByteArray(0)                 // Bild vor dem Greifen (zum Vergleich beim Suchen)
     private var usedCorrX = 0f
     private var usedCorrY = 0f
+    private var usedTravelX = 0f
+    private var usedTravelY = 0f
 
     private val EMPTY = 0
     private val FULL = 1
@@ -152,7 +157,7 @@ class HelperService : Service() {
             layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
         })
         auto = i.getBooleanExtra("auto", false)
-        if (auto) { corrX = prefs().getFloat("corrX", 0f); corrY = prefs().getFloat("corrY", 0f) }
+        if (auto) loadLearning()
         btn = TextView(this).apply {
             text = if (auto) "⏸ Auto" else "↻ Zug"; setTextColor(Color.WHITE); setPadding(32, 20, 32, 20)
             setBackgroundColor(0xCC2D3280.toInt())
@@ -396,7 +401,7 @@ class HelperService : Service() {
      * Sucht das gerade gezogene (schwebende) Teil im Bereich unter dem Brett.
      * Die anderen Teile der Ablage werden ausgeblendet. null = nicht (vollständig) gefunden.
      */
-    private fun findFloating(skip: Int): RectF? {
+    private fun findFloating(): RectF? {
         val cs = BS * W / 8
         // von unter dem Brett bis knapp über den Markierungsbalken – Werbung darunter bleibt draußen
         val top = (BY * H + 8 * cs + 6).toInt(); val bot = (TY1 * H - 34).toInt()
@@ -408,12 +413,21 @@ class HelperService : Service() {
         rs.sort(); gs.sort(); bs.sort()
         val bg = intArrayOf(rs[rs.size / 2], gs[gs.size / 2], bs[bs.size / 2])
         val er = max(2, (6f * W / 1080f).roundToInt())
-        fun on(x: Int, y: Int) = dist(rgb(x, y), bg) > MIND
-        val other = (0..2).filter { it != skip }.mapNotNull { trayBox[it] }.map { RectF(it).apply { inset(-8f, -8f) } }
+        // Teil-Pixel: weicht vom Hintergrund ab UND hat sich seit dem Greifen verändert.
+        // So fallen die anderen Teile der Ablage und der Hinweis-Balken von selbst weg,
+        // auch wenn das gezogene Teil über sie hinweg bewegt wird.
+        val hasRef = refFb.size == fb.size
+        fun ref(x: Int, y: Int): IntArray {
+            val o = y.coerceIn(0, H - 1) * frs + x.coerceIn(0, W - 1) * 4
+            return intArrayOf(refFb[o].toInt() and 255, refFb[o + 1].toInt() and 255, refFb[o + 2].toInt() and 255)
+        }
+        fun on(x: Int, y: Int): Boolean {
+            val c = rgb(x, y)
+            return dist(c, bg) > MIND && (!hasRef || dist(c, ref(x, y)) > 30)
+        }
         var mnX = Int.MAX_VALUE; var mnY = Int.MAX_VALUE; var mxX = -1; var mxY = -1
         for (y in top until bot step 4) {
             for (x in 4 until W - 4 step 4) {
-                if (other.any { it.contains(x.toFloat(), y.toFloat()) }) continue
                 if (on(x, y) && on(x - er, y) && on(x + er, y) && on(x, y - er) && on(x, y + er)) {
                     mnX = min(mnX, x); mxX = max(mxX, x); mnY = min(mnY, y); mxY = max(mxY, y)
                 }
@@ -446,10 +460,11 @@ class HelperService : Service() {
         if (svc == null) { pauseWith("Automatik: Bedienungshilfe \"Block-Helfer Automatik\" ist nicht eingeschaltet"); return }
         val bx = BX * W; val by = BY * H; val cs = BS * W / 8
         val rows = m.cells.maxOf { it[0] } + 1; val cols = m.cells.maxOf { it[1] } + 1
-        usedCorrX = corrX; usedCorrY = corrY
-        val tx = bx + (m.c + cols / 2f + usedCorrX) * cs
-        val ty = by + (m.r + rows / 2f + usedCorrY) * cs
+        val rawX = bx + (m.c + cols / 2f) * cs; val rawY = by + (m.r + rows / 2f) * cs
+        var tx = rawX; var ty = rawY
         val sx = box.centerX(); val sy = box.centerY()
+        if (refFb.size != fb.size) refFb = ByteArray(fb.size)
+        System.arraycopy(fb, 0, refFb, 0, fb.size)
         val top = BY * H + 8 * cs
         dragging = true
 
@@ -467,12 +482,16 @@ class HelperService : Service() {
         fun second(p0: RectF) {
             val bot = TY1 * H - 34
             val roomDown = bot - p0.bottom; val roomUp = p0.top - top
-            val dxF = (if (sx < W / 2f) 1.2f else -1.2f) * cs
+            val dxF = (if (sx < W / 2f) 0.8f else -0.8f) * cs
             var dyF = if (roomDown > roomUp) min(roomDown * 0.3f, cs) else -min(roomUp * 0.3f, cs)
             if (abs(dyF) < 0.15f * cs) dyF = 0f        // kein Platz: senkrecht wie waagerecht annehmen
             val f1x = sx + dxF; val f1y = sy + dyF
             svc.move(f1x, f1y, 200) { ok -> if (!ok) lost() else measure(svc, m.piece, rows, cols, 12, null) { p1 -> h.post {
                 if (p1 == null) { fail("gezogenes Teil nicht gefunden (2)"); return@post }
+                // gelernten Fehler für diese Zugstrecke vorab ausgleichen
+                usedTravelX = (rawX - p0.centerX()) / cs; usedTravelY = (rawY - p0.centerY()) / cs
+                usedCorrX = -predict(learnX, usedTravelX); usedCorrY = -predict(learnY, usedTravelY)
+                tx = rawX + usedCorrX * cs; ty = rawY + usedCorrY * cs
                 val kx = (p1.centerX() - p0.centerX()) / dxF
                 val ky = if (dyF != 0f) (p1.centerY() - p0.centerY()) / dyF else kx
                 if (kx !in 0.5f..5f || ky !in 0.5f..5f) { fail("Zugverhalten nicht messbar (k=%.2f/%.2f)".format(kx, ky)); return@post }
@@ -502,7 +521,7 @@ class HelperService : Service() {
         svc.hold(100) { ok -> h.post {
             if (!ok) { done(null); return@post }
             grab()
-            val p = findFloating(piece)?.takeIf { plausible(it, rows, cols) }
+            val p = findFloating()?.takeIf { plausible(it, rows, cols) }
             if (p != null && last != null && abs(p.centerX() - last.centerX()) <= 4 &&
                 abs(p.centerY() - last.centerY()) <= 4 && abs(p.width() - last.width()) <= 6) { done(p); return@post }
             if (tries <= 0) { done(null); return@post }
@@ -531,13 +550,44 @@ class HelperService : Service() {
         val shape = fresh.map { (it / 8 - r0) * 8 + (it % 8 - c0) }.toSet()
         if (shape != m.cells.map { it[0] * 8 + it[1] }.toSet()) return
         val dr = r0 - m.r; val dc = c0 - m.c
+        // tatsächlicher Fehler = Landestelle minus Zielpunkt, auf den gezielt wurde
+        addSample(learnX, usedTravelX, dc - usedCorrX)
+        addSample(learnY, usedTravelY, dr - usedCorrY)
+        saveLearning()
         if (dr == 0 && dc == 0) { misses = 0; return }
-        // daneben gelandet: Ziel beim nächsten Mal entgegengesetzt verschieben (höchstens 1 Feld je Schritt)
-        corrX = (usedCorrX - dc.coerceIn(-1, 1) * 0.5f).coerceIn(-2f, 2f)
-        corrY = (usedCorrY - dr.coerceIn(-1, 1) * 0.5f).coerceIn(-2f, 2f)
-        prefs().edit().putFloat("corrX", corrX).putFloat("corrY", corrY).apply()
         misses++
-        if (misses >= 4) { misses = 0; pauseWith("Automatik pausiert: Teile landen mehrmals daneben") }
+        if (misses >= 6) { misses = 0; pauseWith("Automatik pausiert: Teile landen mehrmals daneben") }
+    }
+
+    private fun addSample(l: ArrayList<FloatArray>, travel: Float, err: Float) {
+        l.add(floatArrayOf(travel, err))
+        while (l.size > 12) l.removeAt(0)
+    }
+
+    /** Geschätzter Fehler (Felder) bei dieser Zugstrecke: Gerade durch die gespeicherten Züge. */
+    private fun predict(l: List<FloatArray>, travel: Float): Float {
+        if (l.isEmpty()) return 0f
+        val n = l.size
+        val mt = l.sumOf { it[0].toDouble() } / n; val me = l.sumOf { it[1].toDouble() } / n
+        var sxx = 0.0; var sxy = 0.0
+        for (p in l) { sxx += (p[0] - mt) * (p[0] - mt); sxy += (p[0] - mt) * (p[1] - me) }
+        val b = if (n >= 4 && sxx / n > 0.5) (sxy / sxx).coerceIn(-0.5, 0.5) else 0.0
+        return (me + b * (travel - mt)).toFloat().coerceIn(-3f, 3f)
+    }
+
+    private fun loadLearning() {
+        fun parse(k: String, l: ArrayList<FloatArray>) {
+            l.clear()
+            prefs().getString(k, "")!!.split(';').filter { it.contains(':') }.forEach {
+                val (t, e) = it.split(':'); l.add(floatArrayOf(t.toFloat(), e.toFloat()))
+            }
+        }
+        parse("learnX", learnX); parse("learnY", learnY)
+    }
+
+    private fun saveLearning() {
+        fun str(l: List<FloatArray>) = l.joinToString(";") { "${it[0]}:${it[1]}" }
+        prefs().edit().putString("learnX", str(learnX)).putString("learnY", str(learnY)).apply()
     }
 
     // ---------- Fehlerbild ----------
