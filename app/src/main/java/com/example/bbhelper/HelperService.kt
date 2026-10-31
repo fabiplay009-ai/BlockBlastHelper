@@ -326,6 +326,7 @@ class HelperService : Service() {
         lastFloat = null
         landingDone = false
         brain.retry = tryIdx                             // bei Wiederholung Ziel probeweise etwas versetzen
+        brain.guessDefault = false
         val pc = Vision.pieceColor(Vision.Frame(refFb, frs, W, H), Vision.Box(box.left, box.top, box.right, box.bottom))
         DragJob(svc, m, box.centerX(), box.centerY(), pc).start()
     }

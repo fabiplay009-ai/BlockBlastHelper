@@ -20,12 +20,24 @@ public final class AutoBrain {
     public final HashMap<String, float[]> calOff = new HashMap<>();
     /** Gemessene Verstärkungen (kx, ky) der Zugbewegung, die letzten 8. Benutzt wird der Median. */
     public final ArrayList<float[]> kHist = new ArrayList<>();
+    /** Formen, die beim nächsten Mal ausgemessen werden sollen (abgeleitete Werte passten nicht). */
+    public final java.util.HashSet<String> measureNext = new java.util.HashSet<>();
+
+    /**
+     * Notlösung, wenn noch nichts gemessen ist und das Teil nicht zu sehen ist (z. B. rosa Teil auf rosa
+     * Hintergrund): Werte aus Fotos des Spiels – die Teil-Mitte schwebt etwa 2,24 Felder über dem Finger,
+     * die Zugbewegung wird etwa 2,3-fach verstärkt. Danach korrigiert das Lernen aus der Landung.
+     */
+    static final float[] DEFAULT_K = {2.3f, 2.3f};
+    static final float[] DEFAULT_OFF = {0f, -2.24f};
 
     // ---- Zustand des laufenden Zugs ----
     public float usedTravelX, usedTravelY, usedCorrX, usedCorrY;
     public String lastKey = "";
     public boolean lastFast;
     public int misses;
+    /** Letzter Zug mit Notlösungs-Werten geschätzt: aus der Landung nichts lernen. */
+    public boolean guessDefault;
     /** Wiederholung desselben Zugs (Teil sprang zurück): Ziel probeweise etwas versetzen, um das Einrasten zu finden. */
     public int retry;
     static final float[][] EXPLORE = {{0, 0}, {0, -0.45f}, {0, 0.45f}, {-0.45f, 0}, {0.45f, 0}};
@@ -61,17 +73,16 @@ public final class AutoBrain {
         return calK();
     }
 
-    /** Geschätzter Landefehler (Felder) bei dieser Zugstrecke: Gerade durch die gespeicherten Züge. */
+    /**
+     * Geschätzter Landefehler (Felder): Mittelwert der gespeicherten Züge. Bewusst ohne Abhängigkeit von der
+     * Zugstrecke – Landungen unterscheiden nur ganze Felder, eine geschätzte Steigung war meist Zufall und ließ
+     * die Korrektur wegdriften (im Simulator nachgewiesen).
+     */
     public static float predict(List<float[]> l, float travel) {
         if (l.isEmpty()) return 0f;
-        int n = l.size();
-        double mt = 0, me = 0;
-        for (float[] p : l) { mt += p[0]; me += p[1]; }
-        mt /= n; me /= n;
-        double sxx = 0, sxy = 0;
-        for (float[] p : l) { sxx += (p[0] - mt) * (p[0] - mt); sxy += (p[0] - mt) * (p[1] - me); }
-        double b = n >= 4 && sxx / n > 0.5 ? Math.max(-0.5, Math.min(0.5, sxy / sxx)) : 0.0;
-        return (float) Math.max(-3, Math.min(3, me + b * (travel - mt)));
+        double me = 0;
+        for (float[] p : l) me += p[1];
+        return (float) Math.max(-3, Math.min(3, me / l.size()));
     }
 
     /**
@@ -92,7 +103,37 @@ public final class AutoBrain {
 
     /** Das Teil wurde nicht gesetzt (liegt wieder in der Ablage): diese Form beim nächsten Mal neu vermessen. */
     public void notPlaced() {
-        if (lastFast) calOff.remove(lastKey);
+        if (lastFast) { calOff.remove(lastKey); measureNext.add(lastKey); }
+    }
+
+    /**
+     * Lage der Teil-Mitte zum Finger kurz nach dem Greifen (Felder) für diese Form: gemessen, sonst aus den
+     * anderen gemessenen Formen abgeleitet (Mitte = a + b * Reihen bzw. Spalten; laut Fotos schwebt die Mitte
+     * bei allen Formen gleich hoch, b also ~0). null = noch keine Form gemessen.
+     */
+    public float[] offFor(String key, int rows, int cols) {
+        float[] o = calOff.get(key);
+        if (o != null) return o;
+        if (calOff.isEmpty()) return null;
+        ArrayList<float[]> xs = new ArrayList<>(), ys = new ArrayList<>();
+        for (Map.Entry<String, float[]> e : calOff.entrySet()) {
+            String[] rc = e.getKey().split("x");
+            xs.add(new float[]{Integer.parseInt(rc[1]), e.getValue()[0]});
+            ys.add(new float[]{Integer.parseInt(rc[0]), e.getValue()[1]});
+        }
+        return new float[]{line(xs, cols), line(ys, rows)};
+    }
+
+    /** Gerade durch (Größe, Versatz); bei nur einer Größe der Mittelwert. */
+    private static float line(List<float[]> l, float at) {
+        int n = l.size();
+        double mx = 0, my = 0;
+        for (float[] p : l) { mx += p[0]; my += p[1]; }
+        mx /= n; my /= n;
+        double sxx = 0, sxy = 0;
+        for (float[] p : l) { sxx += (p[0] - mx) * (p[0] - mx); sxy += (p[0] - mx) * (p[1] - my); }
+        double b = sxx > 0.01 ? Math.max(-0.6, Math.min(0.6, sxy / sxx)) : 0;
+        return (float) (my + b * (at - mx));
     }
 
     /**
@@ -113,7 +154,7 @@ public final class AutoBrain {
         // tatsächlicher Fehler = Landestelle minus Zielpunkt, auf den gezielt wurde. Mehr als ein Feld
         // daneben ist ein Ausreißer (z. B. Fehlmessung) und wird nicht gelernt – sonst zieht ein einzelner
         // Fehlwurf die nächsten Züge mit.
-        if (Math.abs(dr) <= 1 && Math.abs(dc) <= 1) {
+        if (Math.abs(dr) <= 1 && Math.abs(dc) <= 1 && !guessDefault) {
             addSample(learnX, usedTravelX, dc - usedCorrX);
             addSample(learnY, usedTravelY, dr - usedCorrY);
         }
@@ -121,7 +162,7 @@ public final class AutoBrain {
         else {
             misses++;
             // diese Form beim nächsten Mal neu ausmessen statt mit womöglich falschen Werten weiterzumachen
-            if (lastFast) calOff.remove(lastKey);
+            if (lastFast) { calOff.remove(lastKey); measureNext.add(lastKey); }
         }
         return new int[]{dr, dc};
     }
@@ -201,6 +242,8 @@ public final class AutoBrain {
         Vision.Box last, p0;
         final ArrayList<Vision.Box> good = new ArrayList<>();
         public String info = "";
+        /** Ziel nur geschätzt (Teil war nicht zu sehen). */
+        public boolean guessed;
 
         // Ergebnis von onMeasure
         public float ax, ay;
@@ -220,10 +263,26 @@ public final class AutoBrain {
 
         /** Schnellweg, wenn die Form schon vermessen ist: Fingerziel oder null (dann ausmessen). */
         public float[] fastTarget() {
+            if (measureNext.contains(key)) return null;
             float[] k = calK();
-            float[] off = calOff.get(key);
+            float[] off = offFor(key, rows, cols);
             if (k == null || off == null) return null;
             return fingerFor(rawX, rawY, sx + off[0] * cs, sy + off[1] * cs, k[0], k[1], sx, sy, cs, W, H);
+        }
+
+        /**
+         * Ziel ohne Messung: Lage des Teils beim jetzigen Finger (f0) aus Gelerntem bzw. den Notlösungs-Werten
+         * vorhergesagt. Für Teile, die sich nicht vom Hintergrund abheben.
+         */
+        float[] guessTarget() {
+            float[] k = calK();
+            float[] off = offFor(key, rows, cols);
+            // Mit Notlösungs-Werten geschätzt: Landefehler sagt dann nichts über das Einrasten -> nicht lernen
+            guessDefault = k == null || off == null;
+            if (k == null) k = DEFAULT_K;
+            if (off == null) off = DEFAULT_OFF;
+            float px = sx + off[0] * cs + k[0] * (f0x - sx), py = sy + off[1] * cs + k[1] * (f0y - sy);
+            return fingerFor(rawX, rawY, px, py, k[0], k[1], f0x, f0y, cs, W, H);
         }
 
         private void newPhase(int p) { phase = p; ticks = 0; last = null; good.clear(); }
@@ -235,9 +294,13 @@ public final class AutoBrain {
         /** Eine Messung auswerten (raw = gefundene Fläche oder null). */
         public int onMeasure(Vision.Box raw) {
             ticks++;
-            boolean below = raw != null && raw.top >= boardBot - 0.15f * cs;       // ganz unter dem Brett
+            // Endet die Fläche oben an der Brettkante, ist sie angeschnitten (das Brett wird nicht durchsucht)
+            boolean below = raw != null && raw.top >= boardBot + 0.12f * cs;
             boolean inside = raw != null && raw.top > top + 8 && raw.bottom < bot - 8;
-            Vision.Box p = raw != null && below && inside && Vision.plausible(raw, rows, cols, W) ? raw : null;
+            // Größe muss zum Teil passen (Kanten zählen nicht mit, daher ~0,9 Felder je Feld)
+            boolean size = raw != null && Math.abs(raw.width() - cols * cs * 0.9f) <= 0.4f * cs
+                    && Math.abs(raw.height() - rows * cs * 0.9f) <= 0.4f * cs;
+            Vision.Box p = raw != null && below && inside && size && Vision.plausible(raw, rows, cols, W) ? raw : null;
             if (raw == null) info = "nichts gefunden";
             else if (!inside) info = "Fläche stößt an den Rand des Suchbereichs";
             else if (!below) info = "Teil ragt ins Brett";
@@ -258,12 +321,13 @@ public final class AutoBrain {
             // Phase 1: Lage korrigieren, bis das Teil ganz unter dem Brett schwebt. Über gleichfarbigen Brett-Blöcken
             // ist das Teil unsichtbar – endet die Fläche oben an der Brettkante, ragt es also vermutlich hinein.
             if (phase == 1 && p == null && raw != null && ticks >= 3 && lowered < 6) {
-                float fullH = rows * cs;
+                float fullH = rows * cs * 0.92f;     // erwartete Höhe der gefundenen Fläche (Kanten zählen nicht mit)
                 boolean touchBottom = raw.bottom >= bot - 8;
-                boolean hiddenTop = raw.top < boardBot + 0.3f * cs;
+                // Unterkante ist sichtbar; liegt die daraus erwartete Oberkante im Brett, ragt das Teil hinein
+                float predTop = raw.bottom - fullH;
                 float shift = 0;                     // gewünschte Verschiebung des Teils in px (+ = nach unten)
-                if (hiddenTop && !touchBottom) shift = (boardBot + 0.15f * cs) - (raw.bottom - fullH);
-                else if (touchBottom && !hiddenTop) shift = (bot - 0.25f * cs) - (raw.top + fullH);
+                if (!touchBottom && predTop < boardBot + 0.05f * cs) shift = (boardBot + 0.15f * cs) - predTop;
+                else if (touchBottom) shift = (bot - 0.25f * cs) - (raw.top + fullH);
                 if (Math.abs(shift) > 0.05f * cs) {
                     // Verstärkung: bekannt, sonst aus dem letzten Tiefersetzen, sonst vorsichtig geschätzt
                     float k = 2f;
@@ -274,6 +338,7 @@ public final class AutoBrain {
                         if (m > 0.5f && m < 5f) k = m;
                     }
                     if (!touchBottom) { prevBottom = raw.bottom; prevF0y = f0y; }
+                    // (vorher geprüft: Rand des Bildschirms; hier nur Höhe)
                     lowered++;
                     f0y = Math.max(sy - 3 * cs, Math.min(H * 0.97f, f0y + shift / k));
                     newPhase(1);
@@ -297,6 +362,9 @@ public final class AutoBrain {
                     int k = n.size();
                     return result(new Vision.Box(a / k, b / k, c / k, d / k));
                 }
+                // Teil nicht zu sehen: mit vorhergesagter Lage ziehen statt anzuhalten (Landung wird gelernt)
+                float[] t = guessTarget();
+                if (t != null) { guessed = true; ax = t[0]; ay = t[1]; return RELEASE; }
                 return fail("gezogenes Teil nicht gefunden (" + phase + ") – " + info);
             }
             return CONTINUE;
@@ -321,7 +389,7 @@ public final class AutoBrain {
             float[] k;
             if (!sameSize || kx < 0.5f || kx > 5f || (dyF != 0f && (ky < 0.5f || ky > 5f))) {
                 k = calK();
-                if (k == null) return fail(String.format("Zugverhalten nicht messbar (k=%.2f/%.2f)", kx, ky));
+                if (k == null) k = DEFAULT_K;
             } else {
                 k = addK(kx, dyF != 0f ? ky : kx, dyF != 0f);
             }
@@ -331,6 +399,7 @@ public final class AutoBrain {
             // Beim nächsten Teil dieser Form geht es dann ohne Ausmessen.
             float psx = q0.cx() - k[0] * (f0x - sx), psy = q0.cy() - k[1] * (f0y - sy);
             calOff.put(key, new float[]{(psx - sx) / cs, (psy - sy) / cs});
+            measureNext.remove(key);
             ax = t[0]; ay = t[1];
             return RELEASE;
         }

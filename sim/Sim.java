@@ -28,10 +28,27 @@ public class Sim {
     static final float CS = Vision.cell(W), BXP = Vision.BX * W, BYP = Vision.BY * H;
     static final float SLOT_Y = 0.7575f * H, T = CS * Vision.TS;
 
-    // Holz-Design (Farben aus den Screenshots)
-    static final int[] BG = {181, 129, 58}, CELL = {74, 45, 25}, GRID = {52, 30, 16}, FRAMEC = {222, 154, 74};
-    static final int[] BLOCK = {214, 100, 8}, LIGHT = {240, 140, 40}, DARK = {160, 60, 0};
-    static final int[] GHOST = {120, 62, 18}, GLOW = {255, 170, 80};
+    /** Spiel-Design (Farben aus den Screenshots). */
+    static final class Theme {
+        final String name; final int[] bg, cell, grid, frame; final int[][] blocks; final boolean plaid, shine, vstripes;
+        int[][] stripeDark, stripeLight, edge;   // Karo-Streifen und Rand je Blockfarbe (aus den Screenshots)
+        Theme(String name, int[] bg, int[] cell, int[] grid, int[] frame, int[][] blocks, boolean plaid, boolean shine, boolean vstripes) {
+            this.name = name; this.bg = bg; this.cell = cell; this.grid = grid; this.frame = frame; this.blocks = blocks;
+            this.plaid = plaid; this.shine = shine; this.vstripes = vstripes;
+        }
+    }
+    static final Theme WOOD = new Theme("Holz", new int[]{181, 129, 58}, new int[]{74, 45, 25}, new int[]{52, 30, 16},
+            new int[]{222, 154, 74}, new int[][]{{214, 100, 8}}, false, false, false);
+    // Rosa: rosa Teile heben sich kaum vom Hintergrund ab (Abstand 16), blaue deutlich
+    static final Theme PINK = new Theme("Rosa kariert", new int[]{239, 146, 173}, new int[]{80, 42, 55}, new int[]{62, 30, 42},
+            new int[]{226, 132, 160}, new int[][]{{255, 142, 173}, {148, 182, 255}}, true, true, true);
+    static {
+        PINK.stripeDark = new int[][]{{247, 97, 140}, {105, 140, 235}};
+        PINK.stripeLight = new int[][]{{255, 174, 206}, {195, 215, 255}};
+        PINK.edge = new int[][]{{189, 57, 90}, {70, 95, 175}};
+    }
+    static Theme TH = WOOD;
+    static final int[] GLOW = {255, 200, 120};
     static final int[][] HINT = {{47, 123, 245}, {15, 167, 122}, {232, 137, 12}};
     static final int[][] ADS = {{250, 250, 250}, {20, 20, 20}, {240, 150, 20}, {120, 230, 40}};
 
@@ -45,8 +62,11 @@ public class Sim {
         final Random rnd;
         final float kx, ky, biasX, biasY, lift = 1.2f * CS;
         boolean[] board = new boolean[64];
+        int[] boardCol = new int[64];
         long[] clearing = new long[64];
         List<int[]>[] tray = new List[3];
+        int[] trayCol = new int[3];
+        boolean centerAnchor;          // Teil-Mitte fest über dem Finger (wie auf den Fotos) statt Unterkante
         long[] flyStart = new long[3];
         long now = 0, spawnAt = 0;
         // Finger / gezogenes Teil
@@ -105,7 +125,7 @@ public class Sim {
                 if (tray[s] == null || now < flyStart[s] + 350 || s == ret) continue;
                 if (Math.abs(x - slotX(s)) < W / 6f && y > Vision.TY0 * H && y < Vision.TY1 * H) {
                     drag = s; downFx = x; downFy = y;
-                    pDownX = x; pDownY = y - lift - rows(tray[s]) * CS / 2;
+                    pDownX = x; pDownY = centerAnchor ? y - 2.24f * CS : y - lift - rows(tray[s]) * CS / 2;
                     dispX = slotX(s); dispY = SLOT_Y; scale = Vision.TS;
                     return;
                 }
@@ -119,7 +139,7 @@ public class Sim {
             lastDrop = true; lastR = rc[0]; lastC = rc[1];
             if (fits(p, rc[0], rc[1], board)) {
                 lastPlaced = true;
-                for (int[] x : p) board[(rc[0] + x[0]) * 8 + rc[1] + x[1]] = true;
+                for (int[] x : p) { board[(rc[0] + x[0]) * 8 + rc[1] + x[1]] = true; boardCol[(rc[0] + x[0]) * 8 + rc[1] + x[1]] = trayCol[drag]; }
                 tray[drag] = null;
                 int lines = 0;
                 for (int i = 0; i < 8; i++) {
@@ -164,6 +184,7 @@ public class Sim {
             if (spawnAt > 0 && now >= spawnAt) {
                 for (int s = 0; s < 3; s++) {
                     tray[s] = SHAPES.get(rnd.nextInt(SHAPES.size()));
+                    trayCol[s] = rnd.nextInt(TH.blocks.length);
                     flyStart[s] = now + s * 120;                 // nacheinander von rechts
                 }
                 spawnAt = 0;
@@ -185,8 +206,8 @@ public class Sim {
         byte[] render() {
             byte[] b = bgBuf.clone();
             // Brett
-            fill(b, BXP - 14, BYP - 14, 8 * CS + 28, 8 * CS + 28, FRAMEC);
-            fill(b, BXP, BYP, 8 * CS, 8 * CS, GRID);
+            fill(b, BXP - 14, BYP - 14, 8 * CS + 28, 8 * CS + 28, TH.frame);
+            fill(b, BXP, BYP, 8 * CS, 8 * CS, TH.grid);
             int[] ghostRc = null; boolean[] glow = new boolean[64];
             if (drag >= 0) {
                 int[] rc = snap();
@@ -203,15 +224,19 @@ public class Sim {
             }
             for (int i = 0; i < 64; i++) {
                 float x = BXP + (i % 8) * CS, y = BYP + (i / 8) * CS;
-                fill(b, x + 2, y + 2, CS - 4, CS - 4, CELL);
+                fill(b, x + 2, y + 2, CS - 4, CS - 4, TH.cell);
                 if (board[i]) {
-                    if (clearing[i] > 0) block(b, x, y, CS, mix(BLOCK, GLOW, 0.6f));
-                    else if (glow[i]) { block(b, x, y, CS, mix(BLOCK, GLOW, 0.5f)); }
-                    else block(b, x, y, CS, BLOCK);
+                    int[] bc = TH.blocks[boardCol[i]];
+                    // Glanz-Effekt: heller Streifen läuft alle 3 s schräg über die Blöcke
+                    if (TH.shine) { long ph = (now % 3000) / 30; if (Math.abs((i % 8 + i / 8) * 10 - ph) < 8) bc = mix(bc, new int[]{255, 255, 255}, 0.25f); }
+                    if (clearing[i] > 0) block(b, x, y, CS, mix(bc, GLOW, 0.6f), -1);
+                    else if (glow[i]) { block(b, x, y, CS, mix(bc, GLOW, 0.5f), -1); }
+                    else block(b, x, y, CS, bc, boardCol[i]);
                 }
             }
             if (ghostRc != null)
-                for (int[] x : tray[drag]) fill(b, BXP + (ghostRc[1] + x[1]) * CS + 4, BYP + (ghostRc[0] + x[0]) * CS + 4, CS - 8, CS - 8, GHOST);
+                for (int[] x : tray[drag]) fill(b, BXP + (ghostRc[1] + x[1]) * CS + 4, BYP + (ghostRc[0] + x[0]) * CS + 4, CS - 8, CS - 8,
+                        mix(TH.cell, TH.blocks[trayCol[drag]], 0.45f));
             // Hinweis der App (Overlay): Rahmen + Balken unter dem Fach
             if (hint != null) {
                 float st = Math.max(6f, CS * 0.08f), in = st / 2 + 2;
@@ -234,12 +259,12 @@ public class Sim {
                     float a = (now - flyStart[s]) / 350f;
                     cx = W + 200 + (cx - W - 200) * a; sc = 0.5f + 0.5f * a;
                 }
-                piece(b, tray[s], cx, cy, T * sc);
+                piece(b, tray[s], cx, cy, T * sc, trayCol[s]);
             }
             if (drag >= 0) {
                 float jx = 0, jy = 0;
                 if (glitch && rnd.nextFloat() < 0.2f) { jx = (rnd.nextFloat() - 0.5f) * CS; jy = (rnd.nextFloat() - 0.5f) * CS; }
-                piece(b, tray[drag], dispX + jx, dispY + jy, CS * scale);
+                piece(b, tray[drag], dispX + jx, dispY + jy, CS * scale, trayCol[drag]);
             }
             // Combo-Schriftzug (z. B. "GREAT!") quer über der Ablage, gelb mit dunklem Rand
             if (now < textUntil) {
@@ -258,10 +283,12 @@ public class Sim {
             return b;
         }
 
-        static void piece(byte[] b, List<int[]> p, float cx, float cy, float cell) {
+        static void piece(byte[] b, List<int[]> p, float cx, float cy, float cell, int ci) {
+            int[] col = TH.blocks[ci];
             float l = cx - cols(p) * cell / 2, t = cy - rows(p) * cell / 2;
-            for (int[] x : p) fill(b, l + x[1] * cell + 4, t + x[0] * cell + 4, cell, cell, new int[]{140, 98, 40});  // Schatten
-            for (int[] x : p) block(b, l + x[1] * cell, t + x[0] * cell, cell, BLOCK);
+            int[] shadow = mix(TH.bg, new int[]{0, 0, 0}, 0.25f);
+            for (int[] x : p) fill(b, l + x[1] * cell + 4, t + x[0] * cell + 4, cell, cell, shadow);  // Schatten
+            for (int[] x : p) block(b, l + x[1] * cell, t + x[0] * cell, cell, col, ci);
         }
     }
 
@@ -269,13 +296,27 @@ public class Sim {
         return new int[]{(int) (a[0] + (b[0] - a[0]) * f), (int) (a[1] + (b[1] - a[1]) * f), (int) (a[2] + (b[2] - a[2]) * f)};
     }
 
-    /** Block mit Lichtkante oben/links und Schattenkante unten/rechts. */
-    static void block(byte[] b, float x, float y, float s, int[] col) {
+    /** Block mit Lichtkante oben/links und Schattenkante unten/rechts, im rosa Design kariert. */
+    static void block(byte[] b, float x, float y, float s, int[] col, int ci) {
         float e = Math.max(2, s * 0.09f);
-        int[] light = mix(col, LIGHT, 0.8f), dark = mix(col, DARK, 0.9f);
+        int[] light = mix(col, new int[]{255, 255, 255}, 0.3f), dark = mix(col, new int[]{0, 0, 0}, 0.3f);
+        if (TH.edge != null && ci >= 0) dark = TH.edge[ci];
         fill(b, x + 1, y + 1, s - 2, s - 2, dark);
         fill(b, x + 1, y + 1, s - 2 - e, s - 2 - e, light);
         fill(b, x + 1 + e, y + 1 + e, s - 2 - 2 * e, s - 2 - 2 * e, col);
+        if (TH.plaid && ci >= 0) {      // dunkler Umriss (wie im echten rosa Design gemessen: 82,32,33)
+            float o = Math.max(1, s * 0.035f); int[] ol = {82, 32, 33};
+            fill(b, x, y + s - o, s, o, ol); fill(b, x + s - o, y, o, s, ol); fill(b, x, y, s, o * 0.6f, ol); fill(b, x, y, o * 0.6f, s, ol);
+        }
+        if (TH.plaid && ci >= 0) {      // Karomuster: dunklere und hellere Streifen
+            int[] st = TH.stripeDark[ci], lt = TH.stripeLight[ci];
+            float w = s * 0.07f;
+            for (int k = 1; k <= 2; k++) {
+                fill(b, x + e + k * (s - 2 * e) / 3 - w / 2, y + e, w, s - 2 * e, st);
+                fill(b, x + e, y + e + k * (s - 2 * e) / 3 - w / 2, s - 2 * e, w, st);
+                fill(b, x + e + (k - 0.5f) * (s - 2 * e) / 3 - w / 4, y + e, w / 2, s - 2 * e, lt);
+            }
+        }
     }
 
     static void fill(byte[] b, float x, float y, float w, float h, int[] c) {
@@ -293,9 +334,10 @@ public class Sim {
         int[] grain = new int[H];
         for (int y = 0; y < H; y++) grain[y] = r.nextInt(13) - 6;            // Holzmaserung (Querstreifen)
         for (int y = 0; y < H; y++) for (int x = 0; x < W; x++) {
-            int n = grain[y] + ((x * 31 + y * 17) % 7) - 3;
+            int n = (TH.vstripes ? ((x / 80) % 2) * 5 - 2 : grain[y]) + ((x * 31 + y * 17) % 7) - 3;
             int o = y * ST + x * 4;
-            bgBuf[o] = (byte) (BG[0] + n); bgBuf[o + 1] = (byte) (BG[1] + n); bgBuf[o + 2] = (byte) (BG[2] + n); bgBuf[o + 3] = (byte) 255;
+            bgBuf[o] = (byte) Math.max(0, Math.min(255, TH.bg[0] + n)); bgBuf[o + 1] = (byte) Math.max(0, Math.min(255, TH.bg[1] + n));
+            bgBuf[o + 2] = (byte) Math.max(0, Math.min(255, TH.bg[2] + n)); bgBuf[o + 3] = (byte) 255;
         }
     }
 
@@ -411,7 +453,7 @@ public class Sim {
             int rows = 0, cols = 0;
             for (int[] x : m.cells) { rows = Math.max(rows, x[0] + 1); cols = Math.max(cols, x[1] + 1); }
             AutoBrain.Plan plan = brain.new Plan(W, H, box.cx(), box.cy(), rows, cols, m.r, m.c);
-            brain.lastKey = plan.key; landingDone = false; moves++; brain.retry = tryIdx;
+            brain.lastKey = plan.key; landingDone = false; moves++; brain.retry = tryIdx; brain.guessDefault = false;
             g.lastDrop = false;
             float[] t = plan.fastTarget();
             if (t != null) {
@@ -478,7 +520,6 @@ public class Sim {
     // ------------------------------------------------------------------ Szenarien
 
     public static void main(String[] args) {
-        makeBackground();
         long minutes = args.length > 0 ? Long.parseLong(args[0]) : 6;
         float[][] scen = {          // kx, ky, Versatz beim Einrasten x/y (Felder)
             {2.0f, 2.3f, 0.0f, 0.0f},
@@ -488,17 +529,22 @@ public class Sim {
             {2.6f, 2.0f, -0.4f, 0.4f},
             {2.0f, 2.3f, 0.0f, 0.35f, 1},   // mit Combo-Schriftzügen über der Ablage
             {2.0f, 2.3f, 0.0f, 0.35f, 2},   // mit Rucklern des gezogenen Teils
+            {2.3f, 2.3f, 0.0f, 0.3f, 3},    // rosa kariert, Teil-Mitte fest über dem Finger (wie auf den Fotos)
+            {2.3f, 2.3f, 0.2f, -0.3f, 4},   // rosa kariert, Unterkante fest über dem Finger
         };
         int sum = 0, sumOk = 0;
         for (int i = 0; i < scen.length; i++) {
             float[] s = scen[i];
+            int mode = s.length > 4 ? (int) s[4] : 0;
+            TH = mode >= 3 ? PINK : WOOD;
+            makeBackground();
             Game g = new Game(1000 + i, s[0], s[1], s[2], s[3]);
-            g.texts = s.length > 4 && s[4] == 1; g.glitch = s.length > 4 && s[4] == 2;
+            g.texts = mode == 1; g.glitch = mode == 2; g.centerAnchor = mode == 3 || mode == 0;
             Driver d = new Driver(g);
             d.run(minutes * 60_000);
             sum += d.moves; sumOk += d.correct;
-            System.out.printf("k=%.1f/%.1f Versatz=%+.2f/%+.2f%s | Züge %d, richtig %d (%.1f %%), daneben %d, zurück %d, Pausen %d, Ablage falsch %d, neu gerechnet %d, Game Over %d, Ø %.1f s/Zug%n",
-                s[0], s[1], s[2], s[3], g.texts ? " +Schrift" : g.glitch ? " +Ruckler" : "", d.moves, d.correct, 100.0 * d.correct / Math.max(1, d.moves), d.misplaced, d.returned,
+            System.out.printf("%-12s k=%.1f/%.1f Versatz=%+.2f/%+.2f%s%s | Züge %d, richtig %d (%.1f %%), daneben %d, zurück %d, Pausen %d, Ablage falsch %d, neu gerechnet %d, Game Over %d, Ø %.1f s/Zug%n",
+                TH.name, s[0], s[1], s[2], s[3], g.texts ? " +Schrift" : g.glitch ? " +Ruckler" : "", g.centerAnchor ? " Mitte" : " Unterkante", d.moves, d.correct, 100.0 * d.correct / Math.max(1, d.moves), d.misplaced, d.returned,
                 d.fails, d.wrongReads, d.recomputes, g.gameOvers, minutes * 60.0 / Math.max(1, d.moves));
             for (Map.Entry<String, Integer> e : d.reasons.entrySet()) System.out.println("    " + e.getValue() + "x " + e.getKey());
         }

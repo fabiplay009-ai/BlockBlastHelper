@@ -249,7 +249,9 @@ public final class Vision {
     }
 
     /**
-     * Sucht das gerade gezogene (schwebende) Teil zwischen oberem Brettrand und Werbung.
+     * Sucht das gerade gezogene (schwebende) Teil zwischen unterem Brettrand und Werbung. Das Brett selbst
+     * bleibt draußen (Schatten, Aufleuchten, Glanz-Effekte, gleichfarbige Blöcke); ragt das Teil hinein, endet
+     * die Fläche oben an der Brettkante und der Aufrufer setzt den Finger tiefer.
      * Teil-Pixel = weicht vom Ablage-Hintergrund ab, hat die Farbe des Teils [pc] (der dunklere Schatten an
      * der Landestelle zählt so nicht) UND hat sich seit dem Greifen [ref] verändert; so fallen Brett, andere
      * Teile und Hinweis-Balken von selbst weg. null = nichts gefunden. Ob die Fläche an den Rand des
@@ -258,7 +260,7 @@ public final class Vision {
     public static Box findFloating(Frame f, Frame ref, int[] pc) {
         int W = f.w, H = f.h;
         float cs = cell(W);
-        int top = (int) (BY * H + 4), bot = (int) floatBottom(H);
+        int top = (int) (BY * H + 8 * cs + 2), bot = (int) floatBottom(H);
         int bgTop = (int) (BY * H + 8 * cs + 6);              // Hintergrundfarbe nur unter dem Brett bestimmen
         byte[] b = f.buf;
         byte[] rf = ref != null && ref.buf.length == b.length ? ref.buf : null;
@@ -267,37 +269,32 @@ public final class Vision {
         if (bgs.isEmpty()) return null;
         int[] bg = median(bgs);
         int er = Math.max(2, Math.round(6f * W / 1080f));
-        int boardBot = (int) (BY * H + 8 * cs);
+        // Hebt sich das Teil kaum vom Hintergrund ab (z. B. rosa auf rosa), entscheidet nur Farbe + Veränderung
+        boolean useBg = pc == null || dist(pc, bg) >= 2 * MIND;
         int mnX = Integer.MAX_VALUE, mnY = Integer.MAX_VALUE, mxX = -1, mxY = -1;
         for (int y = top; y < bot; y += 5)
             for (int x = 4; x < W - 4; x += 5)
-                if (fl(f, rf, bg, pc, boardBot, x, y) && fl(f, rf, bg, pc, boardBot, x - er, y) && fl(f, rf, bg, pc, boardBot, x + er, y)
-                        && fl(f, rf, bg, pc, boardBot, x, y - er) && fl(f, rf, bg, pc, boardBot, x, y + er)) {
+                if (fl(f, rf, bg, pc, useBg, x, y) && fl(f, rf, bg, pc, useBg, x - er, y) && fl(f, rf, bg, pc, useBg, x + er, y)
+                        && fl(f, rf, bg, pc, useBg, x, y - er) && fl(f, rf, bg, pc, useBg, x, y + er)) {
                     mnX = Math.min(mnX, x); mxX = Math.max(mxX, x); mnY = Math.min(mnY, y); mxY = Math.max(mxY, y);
                 }
         if (mxX < 0) return null;
         return new Box(mnX, mnY, mxX, mxY);
     }
 
-    private static boolean fl(Frame f, byte[] rf, int[] bg, int[] pc, int boardBot, int x, int y) {
+    private static boolean fl(Frame f, byte[] rf, int[] bg, int[] pc, boolean useBg, int x, int y) {
         int o = f.off(x, y);
         byte[] b = f.buf;
         if (o + 2 >= b.length) return false;
         int r = b[o] & 255, g = b[o + 1] & 255, bl = b[o + 2] & 255;
         int dr = r - bg[0], dg = g - bg[1], db = bl - bg[2];
-        if (dr * dr + dg * dg + db * db <= MIND * MIND) return false;
+        if (useBg && dr * dr + dg * dg + db * db <= MIND * MIND) return false;
         if (pc != null) {
             int pr = r - pc[0], pg = g - pc[1], pb = bl - pc[2];
             if (pr * pr + pg * pg + pb * pb > 60 * 60) return false;
         }
         if (rf == null) return true;
         int rr = rf[o] & 255, rg = rf[o + 1] & 255, rb = rf[o + 2] & 255;
-        // Auf dem Brett: war hier vorher schon ein Block in Teilfarbe, zählt das Pixel nicht – sonst halten
-        // noch laufende Animationen gleichfarbiger Brett-Blöcke als "gezogenes Teil" her.
-        if (pc != null && y < boardBot) {
-            int qr = rr - pc[0], qg = rg - pc[1], qb = rb - pc[2];
-            if (qr * qr + qg * qg + qb * qb <= 60 * 60) return false;
-        }
         int e1 = r - rr, e2 = g - rg, e3 = bl - rb;
         return e1 * e1 + e2 * e2 + e3 * e3 > 30 * 30;
     }
