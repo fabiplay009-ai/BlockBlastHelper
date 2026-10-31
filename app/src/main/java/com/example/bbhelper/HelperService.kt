@@ -100,7 +100,6 @@ class HelperService : Service() {
     // und Verstärkung der Zugbewegung. Damit geht es ab dem zweiten Teil einer Form ohne Ausmessen.
     private val calOff = HashMap<String, FloatArray>()
     private var calK: FloatArray? = null
-    private val fastMiss = HashMap<String, Int>()
     private var lastDragKey = ""
     private var lastDragFast = false
     private var landingDone = false
@@ -439,7 +438,7 @@ class HelperService : Service() {
 
     private fun findFloating(pc: IntArray? = null): RectF? {
         val cs = BS * W / 8
-        val top = (BY * H + 4).toInt(); val bot = (TY1 * H - 34).toInt()
+        val top = (BY * H + 4).toInt(); val bot = floatBottom().toInt()
         val bgTop = (BY * H + 8 * cs + 6).toInt()            // Hintergrundfarbe nur unter dem Brett bestimmen
         val f = fb; val rf = refFb; val st = frs
         if (st <= 0 || f.isEmpty()) return null
@@ -487,9 +486,12 @@ class HelperService : Service() {
             }
         }
         if (mxX < 0) return null
-        if (mnY <= top + 8 || mxY >= bot - 8) return null    // ragt aus dem Suchbereich: Lage unsicher
+        // ob die Fläche an den Rand des Suchbereichs stößt, prüft der Aufrufer
         return RectF(mnX.toFloat(), mnY.toFloat(), mxX.toFloat(), mxY.toFloat())
     }
+
+    /** Unterer Rand des Suchbereichs: knapp über der Werbung (der Hinweis-Balken ist unverändert und fällt weg). */
+    private fun floatBottom() = H * 0.925f
 
     /** Passt die gefundene Fläche zur Form des Teils (ungefähr Brett-Feldgröße)? */
     private fun plausible(r: RectF, rows: Int, cols: Int): Boolean {
@@ -530,6 +532,11 @@ class HelperService : Service() {
         DragJob(svc, m, box.centerX(), box.centerY(), pieceColor(box, refFb)).start()
     }
 
+    /**
+     * Ein Zug im Automatik-Modus. Gemessen wird nur, solange das gezogene Teil UNTER dem Brett schwebt:
+     * über dem Brett stören gleichfarbige Blöcke, der Schatten an der Landestelle und das Aufleuchten
+     * von Reihen, die gleich voll würden.
+     */
     private inner class DragJob(val svc: AutoService, val m: Solver.Move, val sx: Float, val sy: Float, val pc: IntArray?) {
         val cs = BS * W / 8
         val rows = m.cells.maxOf { it[0] } + 1
@@ -537,8 +544,9 @@ class HelperService : Service() {
         val key = "${rows}x$cols"
         val rawX = BX * W + (m.c + cols / 2f) * cs
         val rawY = BY * H + (m.r + rows / 2f) * cs
-        val top = BY * H
-        val bot = TY1 * H - 34
+        val top = BY * H                    // oberer Rand des Suchbereichs
+        val boardBot = BY * H + 8 * cs      // Unterkante des Bretts
+        val bot = floatBottom()             // unterer Rand des Suchbereichs
 
         var phase = 1                      // 1 = Messung nach dem Greifen, 2 = nach der Testbewegung
         var next: (() -> Unit)? = null     // statt weiter zu halten als Nächstes ausführen
@@ -548,6 +556,9 @@ class HelperService : Service() {
         var last: RectF? = null
         val good = ArrayList<RectF>()
         var p0: RectF? = null
+        var f0x = sx                       // Finger bei Messung 1 (kann tiefer als die Ablage liegen)
+        var f0y = sy
+        var lowered = 0                    // so oft wurde der Finger für Messung 1 tiefer gesetzt
         var dxF = 0f
         var dyF = 0f
 
@@ -556,29 +567,35 @@ class HelperService : Service() {
             val k = calK; val off = calOff[key]
             if (k != null && off != null) { fast(k, off); return }
             lastDragFast = false
+            measured()
+        }
+
+        fun measured() {
             svc.down(sx, sy, 150) { ok -> if (!ok) h.post { dragging = false; dragFailed() } else startPhase(1) }
         }
 
         /** Form schon vermessen: greifen, kurz anheben lassen, direkt zum Ziel, loslassen. */
         fun fast(k: FloatArray, off: FloatArray) {
             lastDragFast = true
-            val p0x = sx + off[0] * cs; val p0y = sy + off[1] * cs
-            val (fx, fy) = fingerFor(p0x, p0y, k[0], k[1]) ?: run { calOff.remove(key); lastDragFast = false
-                svc.down(sx, sy, 150) { ok -> if (!ok) h.post { dragging = false; dragFailed() } else startPhase(1) }; return }
+            val t = fingerFor(sx + off[0] * cs, sy + off[1] * cs, k[0], k[1], sx, sy)
+            if (t == null) { calOff.remove(key); lastDragFast = false; measured(); return }
             svc.down(sx, sy, 150) { ok ->
                 if (!ok) h.post { dragging = false; dragFailed() }
                 else svc.hold(150) { ok1 ->
-                    if (!ok1) h.post { dragging = false; dragFailed() } else release(fx, fy)
+                    if (!ok1) h.post { dragging = false; dragFailed() } else release(t.first, t.second)
                 }
             }
         }
 
-        /** Fingerziel, damit die Teil-Mitte (bei Finger S an Stelle p0) über dem Ziel liegt; mit gelernter Korrektur. */
-        fun fingerFor(p0x: Float, p0y: Float, kx: Float, ky: Float): Pair<Float, Float>? {
-            usedTravelX = (rawX - p0x) / cs; usedTravelY = (rawY - p0y) / cs
+        /**
+         * Fingerziel, damit die Teil-Mitte über dem Ziel liegt: das Teil war bei Finger (fx0, fy0) an (px, py),
+         * es bewegt sich um k mal die Fingerbewegung. Mit gelernter Feinkorrektur.
+         */
+        fun fingerFor(px: Float, py: Float, kx: Float, ky: Float, fx0: Float, fy0: Float): Pair<Float, Float>? {
+            usedTravelX = (rawX - px) / cs; usedTravelY = (rawY - py) / cs
             usedCorrX = -predict(learnX, usedTravelX); usedCorrY = -predict(learnY, usedTravelY)
             val tx = rawX + usedCorrX * cs; val ty = rawY + usedCorrY * cs
-            val fx = sx + (tx - p0x) / kx; val fy = sy + (ty - p0y) / ky
+            val fx = fx0 + (tx - px) / kx; val fy = fy0 + (ty - py) / ky
             return if (fx < 2 || fx > W - 2 || fy < 2 || fy > H - 2) null else Pair(fx, fy)
         }
 
@@ -635,15 +652,36 @@ class HelperService : Service() {
             }
         }
 
+        /** Finger für Messung 1 tiefer setzen, damit das Teil ganz unter dem Brett schwebt. */
+        fun lower() {
+            lowered++
+            f0y = min(f0y + 0.7f * cs, H * 0.97f)
+            decide {
+                svc.move(f0x, f0y, 150) { ok ->
+                    if (!ok) h.post { stopWith("Geste abgebrochen (tiefer setzen)") } else startPhase(1)
+                }
+            }
+        }
+
         /** Eine Messung auswerten (Hauptthread). */
         fun evaluate(raw: RectF?) {
             if (decided || !dragging) return
             ticks++
-            val p = raw?.takeIf { plausible(it, rows, cols) }
             lastFloat = raw
-            measureInfo = if (raw == null) "nichts gefunden" else
-                "Fläche %.2f x %.2f Felder (erwartet %d x %d), passend: %d".format(
+            val below = raw != null && raw.top >= boardBot - 0.15f * cs       // ganz unter dem Brett
+            val inside = raw != null && raw.top > top + 8 && raw.bottom < bot - 8
+            val p = raw?.takeIf { below && inside && plausible(it, rows, cols) }
+            measureInfo = when {
+                raw == null -> "nichts gefunden"
+                !inside -> "Fläche stößt an den Rand des Suchbereichs"
+                !below -> "Teil ragt ins Brett"
+                else -> "Fläche %.2f x %.2f Felder (erwartet %d x %d), passend: %d".format(
                     raw.width() / cs, raw.height() / cs, cols, rows, good.size + (if (p != null) 1 else 0))
+            } + (if (lowered > 0) ", Finger ${lowered}x tiefer" else "")
+            // Messung 1: ragt das Teil (nach dem Anheben) ins Brett, Finger tiefer setzen
+            if (phase == 1 && p == null && raw != null && !below && ticks >= 3 && lowered < 4 && f0y < H * 0.97f) {
+                lower(); return
+            }
             if (p != null) {
                 val l = last
                 good.add(p)
@@ -667,12 +705,13 @@ class HelperService : Service() {
         fun result(r: RectF) {
             if (phase == 1) {
                 p0 = r
-                val roomDown = bot - r.bottom; val roomUp = r.top - top
-                dxF = (if (sx < W / 2f) 0.8f else -0.8f) * cs
-                dyF = if (roomDown > roomUp) min(roomDown * 0.3f, cs) else -min(roomUp * 0.3f, cs)
-                if (abs(dyF) < 0.15f * cs) dyF = 0f        // kein Platz: senkrecht wie waagerecht annehmen
+                // Testbewegung: seitwärts zur Mitte; nach unten nur, wenn unter dem Teil Platz ist.
+                // Nie nach oben – über dem Brett ist keine saubere Messung möglich.
+                dxF = (if (f0x < W / 2f) 0.8f else -0.8f) * cs
+                val roomDown = bot - r.bottom
+                dyF = if (roomDown > 0.6f * cs) min(roomDown / 4f, 0.6f * cs) else 0f
                 decide {
-                    svc.move(sx + dxF, sy + dyF, 200) { ok ->
+                    svc.move(f0x + dxF, f0y + dyF, 200) { ok ->
                         if (!ok) h.post { stopWith("Geste abgebrochen (Testbewegung)") } else startPhase(2)
                     }
                 }
@@ -682,11 +721,13 @@ class HelperService : Service() {
             val kx = (r.centerX() - q0.centerX()) / dxF
             val ky = if (dyF != 0f) (r.centerY() - q0.centerY()) / dyF else (calK?.get(1) ?: kx)
             if (kx !in 0.5f..5f || ky !in 0.5f..5f) { fail("Zugverhalten nicht messbar (k=%.2f/%.2f)".format(kx, ky)); return }
-            val target = fingerFor(q0.centerX(), q0.centerY(), kx, ky)
+            val target = fingerFor(q0.centerX(), q0.centerY(), kx, ky, f0x, f0y)
             if (target == null) { fail("Ziel außerhalb des Bildschirms"); return }
-            // Messung merken: beim nächsten Teil dieser Form geht es ohne Ausmessen
+            // Messung merken: Lage der Teil-Mitte, wenn der Finger noch an der Ablage wäre (S), relativ zu S.
+            // Beim nächsten Teil dieser Form geht es dann ohne Ausmessen.
             calK = if (dyF != 0f || calK == null) floatArrayOf(kx, ky) else floatArrayOf(kx, calK!![1])
-            calOff[key] = floatArrayOf((q0.centerX() - sx) / cs, (q0.centerY() - sy) / cs)
+            val psx = q0.centerX() - kx * (f0x - sx); val psy = q0.centerY() - ky * (f0y - sy)
+            calOff[key] = floatArrayOf((psx - sx) / cs, (psy - sy) / cs)
             saveLearning()
             decide { release(target.first, target.second) }
         }
@@ -722,17 +763,19 @@ class HelperService : Service() {
         if (shape != m.cells.map { it[0] * 8 + it[1] }.toSet()) return false
         landingDone = true
         val dr = r0 - m.r; val dc = c0 - m.c
-        // tatsächlicher Fehler = Landestelle minus Zielpunkt, auf den gezielt wurde
-        addSample(learnX, usedTravelX, dc - usedCorrX)
-        addSample(learnY, usedTravelY, dr - usedCorrY)
+        // tatsächlicher Fehler = Landestelle minus Zielpunkt, auf den gezielt wurde. Mehr als ein Feld
+        // daneben ist ein Ausreißer (z. B. Fehlmessung) und wird nicht gelernt – sonst zieht ein einzelner
+        // Fehlwurf die nächsten Züge mit.
+        if (abs(dr) <= 1 && abs(dc) <= 1) {
+            addSample(learnX, usedTravelX, dc - usedCorrX)
+            addSample(learnY, usedTravelY, dr - usedCorrY)
+        }
         if (dr == 0 && dc == 0) {
-            misses = 0; fastMiss.remove(lastDragKey)
+            misses = 0
         } else {
             misses++
-            if (lastDragFast) {
-                val n = (fastMiss[lastDragKey] ?: 0) + 1
-                if (n >= 2) { calOff.remove(lastDragKey); fastMiss.remove(lastDragKey) } else fastMiss[lastDragKey] = n
-            }
+            // diese Form beim nächsten Mal neu ausmessen statt mit womöglich falschen Werten weiterzumachen
+            if (lastDragFast) calOff.remove(lastDragKey)
             if (misses >= 6) { misses = 0; pauseWith("Automatik pausiert: Teile landen mehrmals daneben") }
         }
         saveLearning()
