@@ -38,23 +38,26 @@ class AutoService : AccessibilityService() {
 
     private fun send(s: GestureDescription.StrokeDescription, done: (Boolean) -> Unit) {
         cur = s
-        val ok = dispatchGesture(GestureDescription.Builder().addStroke(s).build(), object : GestureResultCallback() {
-            override fun onCompleted(g: GestureDescription?) { done(true) }
-            override fun onCancelled(g: GestureDescription?) { cur = null; done(false) }
-        }, null)
+        val ok = try {
+            dispatchGesture(GestureDescription.Builder().addStroke(s).build(), object : GestureResultCallback() {
+                override fun onCompleted(g: GestureDescription?) { done(true) }
+                override fun onCancelled(g: GestureDescription?) { cur = null; done(false) }
+            }, null)
+        } catch (e: Exception) { false }
         if (!ok) { cur = null; done(false) }
     }
 
     /** Finger auf (x, y) setzen und [ms] lang halten. */
     fun down(x: Float, y: Float, ms: Long, done: (Boolean) -> Unit) {
         fx = x + 1; fy = y + 1
-        send(GestureDescription.StrokeDescription(line(x, y, fx, fy), 0, ms, true), done)
+        val s = try { GestureDescription.StrokeDescription(line(x, y, fx, fy), 0, ms, true) } catch (e: Exception) { return done(false) }
+        send(s, done)
     }
 
     /** Finger in [ms] nach (x, y) bewegen (bleibt danach unten). */
     fun move(x: Float, y: Float, ms: Long, done: (Boolean) -> Unit) {
         val c = cur ?: return done(false)
-        val s = c.continueStroke(line(fx, fy, x, y), 0, ms, true)
+        val s = try { c.continueStroke(line(fx, fy, x, y), 0, ms, true) } catch (e: Exception) { cur = null; return done(false) }
         fx = x; fy = y
         send(s, done)
     }
@@ -65,7 +68,7 @@ class AutoService : AccessibilityService() {
     /** Finger loslassen. */
     fun up(done: (Boolean) -> Unit) {
         val c = cur ?: return done(false)
-        val s = c.continueStroke(line(fx, fy, fx + 0.5f, fy), 0, 60, false)
+        val s = try { c.continueStroke(line(fx, fy, fx + 0.5f, fy), 0, 60, false) } catch (e: Exception) { cur = null; return done(false) }
         send(s) { ok -> cur = null; done(ok) }
     }
 }

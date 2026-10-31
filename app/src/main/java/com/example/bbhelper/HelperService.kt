@@ -403,10 +403,12 @@ class HelperService : Service() {
      */
     private fun findFloating(): RectF? {
         val cs = BS * W / 8
-        // von unter dem Brett bis knapp über den Markierungsbalken – Werbung darunter bleibt draußen
-        val top = (BY * H + 8 * cs + 6).toInt(); val bot = (TY1 * H - 34).toInt()
+        // vom oberen Brettrand bis knapp über den Markierungsbalken – Werbung darunter bleibt draußen.
+        // Hohe Teile schweben teilweise schon über dem Brett; dort hilft der Vergleich mit dem Bild vor dem Greifen.
+        val top = (BY * H + 4).toInt(); val bot = (TY1 * H - 34).toInt()
+        val bgTop = (BY * H + 8 * cs + 6).toInt()            // Hintergrundfarbe nur unter dem Brett bestimmen
         val rs = ArrayList<Int>(); val gs = ArrayList<Int>(); val bs = ArrayList<Int>()
-        for (y in top until bot step 12) for (x in 4 until W - 4 step 12) {
+        for (y in bgTop until bot step 12) for (x in 4 until W - 4 step 12) {
             val p = rgb(x, y); rs.add(p[0]); gs.add(p[1]); bs.add(p[2])
         }
         if (rs.isEmpty()) return null
@@ -465,17 +467,20 @@ class HelperService : Service() {
         val sx = box.centerX(); val sy = box.centerY()
         if (refFb.size != fb.size) refFb = ByteArray(fb.size)
         System.arraycopy(fb, 0, refFb, 0, fb.size)
-        val top = BY * H + 8 * cs
+        val top = BY * H
         dragging = true
 
         fun fail(msg: String) {
             svc.up { h.post {
                 dragging = false; dragAt = 0
-                saveDebug("Auto: $msg", lastPieces, readCells(), m)
+                try { saveDebug("Auto: $msg", lastPieces, readCells(), m) } catch (_: Exception) {}
                 pauseWith("Automatik pausiert: $msg")
             } }
         }
         fun lost() = h.post { dragging = false; dragFailed() }
+        fun safe(block: () -> Unit) = h.post {
+            try { block() } catch (e: Exception) { fail("Fehler: ${e.javaClass.simpleName} ${e.message ?: ""}".trim()) }
+        }
 
         // Schritt 2: Finger seitlich zur Mitte und – nur so weit Platz ist – hoch oder runter, erneut messen.
         // (Das Spiel bewegt das Teil um ein Vielfaches des Fingers, daher vorsichtig.)
@@ -486,18 +491,18 @@ class HelperService : Service() {
             var dyF = if (roomDown > roomUp) min(roomDown * 0.3f, cs) else -min(roomUp * 0.3f, cs)
             if (abs(dyF) < 0.15f * cs) dyF = 0f        // kein Platz: senkrecht wie waagerecht annehmen
             val f1x = sx + dxF; val f1y = sy + dyF
-            svc.move(f1x, f1y, 200) { ok -> if (!ok) lost() else measure(svc, m.piece, rows, cols, 12, null) { p1 -> h.post {
-                if (p1 == null) { fail("gezogenes Teil nicht gefunden (2)"); return@post }
+            svc.move(f1x, f1y, 200) { ok -> if (!ok) lost() else measure(svc, m.piece, rows, cols, 12, null) { p1 -> safe {
+                if (p1 == null) { fail("gezogenes Teil nicht gefunden (2)"); return@safe }
                 // gelernten Fehler für diese Zugstrecke vorab ausgleichen
                 usedTravelX = (rawX - p0.centerX()) / cs; usedTravelY = (rawY - p0.centerY()) / cs
                 usedCorrX = -predict(learnX, usedTravelX); usedCorrY = -predict(learnY, usedTravelY)
                 tx = rawX + usedCorrX * cs; ty = rawY + usedCorrY * cs
                 val kx = (p1.centerX() - p0.centerX()) / dxF
                 val ky = if (dyF != 0f) (p1.centerY() - p0.centerY()) / dyF else kx
-                if (kx !in 0.5f..5f || ky !in 0.5f..5f) { fail("Zugverhalten nicht messbar (k=%.2f/%.2f)".format(kx, ky)); return@post }
+                if (kx !in 0.5f..5f || ky !in 0.5f..5f) { fail("Zugverhalten nicht messbar (k=%.2f/%.2f)".format(kx, ky)); return@safe }
                 val fx = sx + (tx - p0.centerX()) / kx
                 val fy = sy + (ty - p0.centerY()) / ky
-                if (fx < 2 || fx > W - 2 || fy < 2 || fy > H - 2) { fail("Ziel außerhalb des Bildschirms"); return@post }
+                if (fx < 2 || fx > W - 2 || fy < 2 || fy > H - 2) { fail("Ziel außerhalb des Bildschirms"); return@safe }
                 svc.move(fx, fy, 450) { ok2 -> if (!ok2) lost() else svc.hold(200) { _ ->
                     svc.up { _ -> h.post { dragging = false; dragAt = SystemClock.uptimeMillis() } }
                 } }
@@ -507,7 +512,7 @@ class HelperService : Service() {
         // Schritt 1: greifen und halten, bis das Teil fertig "angehoben" ist und ruhig liegt, dann messen
         svc.down(sx, sy, 150) { ok0 ->
             if (!ok0) lost()
-            else measure(svc, m.piece, rows, cols, 12, null) { p0 -> h.post {
+            else measure(svc, m.piece, rows, cols, 12, null) { p0 -> safe {
                 if (p0 == null) fail("gezogenes Teil nicht gefunden (1)") else second(p0)
             } }
         }
@@ -520,8 +525,7 @@ class HelperService : Service() {
     private fun measure(svc: AutoService, piece: Int, rows: Int, cols: Int, tries: Int, last: RectF?, done: (RectF?) -> Unit) {
         svc.hold(100) { ok -> h.post {
             if (!ok) { done(null); return@post }
-            grab()
-            val p = findFloating()?.takeIf { plausible(it, rows, cols) }
+            val p = try { grab(); findFloating()?.takeIf { plausible(it, rows, cols) } } catch (e: Exception) { null }
             if (p != null && last != null && abs(p.centerX() - last.centerX()) <= 4 &&
                 abs(p.centerY() - last.centerY()) <= 4 && abs(p.width() - last.width()) <= 6) { done(p); return@post }
             if (tries <= 0) { done(null); return@post }
