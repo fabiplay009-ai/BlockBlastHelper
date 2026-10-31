@@ -8,6 +8,7 @@ import android.content.Intent
 import android.graphics.Path
 import android.provider.Settings
 import android.view.accessibility.AccessibilityEvent
+import kotlin.math.roundToInt
 
 /** Bedienungshilfe, die für den Automatik-Modus Teile per Wischgeste aus der Ablage aufs Brett zieht. */
 class AutoService : AccessibilityService() {
@@ -35,6 +36,9 @@ class AutoService : AccessibilityService() {
     private var cur: GestureDescription.StrokeDescription? = null
     private var fx = 0f
     private var fy = 0f
+    private var wiggle = false
+    // Android prüft, ob ein Folgeschritt exakt dort beginnt, wo der vorige endete -> nur ganze Pixel
+    private fun px(v: Float) = v.roundToInt().toFloat()
 
     private fun send(s: GestureDescription.StrokeDescription, done: (Boolean) -> Unit) {
         cur = s
@@ -49,26 +53,31 @@ class AutoService : AccessibilityService() {
 
     /** Finger auf (x, y) setzen und [ms] lang halten. */
     fun down(x: Float, y: Float, ms: Long, done: (Boolean) -> Unit) {
-        fx = x + 1; fy = y + 1
-        val s = try { GestureDescription.StrokeDescription(line(x, y, fx, fy), 0, ms, true) } catch (e: Exception) { return done(false) }
+        val x0 = px(x); val y0 = px(y)
+        fx = x0 + 1; fy = y0 + 1
+        val s = try { GestureDescription.StrokeDescription(line(x0, y0, fx, fy), 0, ms, true) } catch (e: Exception) { return done(false) }
         send(s, done)
     }
 
     /** Finger in [ms] nach (x, y) bewegen (bleibt danach unten). */
     fun move(x: Float, y: Float, ms: Long, done: (Boolean) -> Unit) {
         val c = cur ?: return done(false)
-        val s = try { c.continueStroke(line(fx, fy, x, y), 0, ms, true) } catch (e: Exception) { cur = null; return done(false) }
-        fx = x; fy = y
+        val nx = px(x).coerceAtLeast(0f); val ny = px(y).coerceAtLeast(0f)
+        val s = try { c.continueStroke(line(fx, fy, nx, ny), 0, ms, true) } catch (e: Exception) { cur = null; return done(false) }
+        fx = nx; fy = ny
         send(s, done)
     }
 
     /** Finger [ms] lang ruhig halten. */
-    fun hold(ms: Long, done: (Boolean) -> Unit) = move(fx + 0.5f, fy, ms, done)
+    fun hold(ms: Long, done: (Boolean) -> Unit) {
+        wiggle = !wiggle
+        move(if (wiggle) fx + 1 else fx - 1, fy, ms, done)
+    }
 
     /** Finger loslassen. */
     fun up(done: (Boolean) -> Unit) {
         val c = cur ?: return done(false)
-        val s = try { c.continueStroke(line(fx, fy, fx + 0.5f, fy), 0, 60, false) } catch (e: Exception) { cur = null; return done(false) }
+        val s = try { c.continueStroke(line(fx, fy, fx + 1, fy), 0, 60, false) } catch (e: Exception) { cur = null; return done(false) }
         send(s) { ok -> cur = null; done(ok) }
     }
 }

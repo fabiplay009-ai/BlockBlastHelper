@@ -14,6 +14,7 @@ import android.media.ImageReader
 import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
 import android.os.Handler
+import android.os.HandlerThread
 import android.os.IBinder
 import android.os.Looper
 import android.os.SystemClock
@@ -300,9 +301,9 @@ class HelperService : Service() {
     // ---------- Ablauf ----------
 
     private fun tick() {
+        if (auto && dragging) return   // Geste läuft gerade (Bilder liest dann der Mess-Thread)
         grab()
         if (!hasFrame) return
-        if (auto && dragging) return   // Geste läuft gerade
         val tray = readTray()
         val count = tray.count { it.isNotEmpty() }
         val sig = tray.joinToString("|") { cells -> cells.joinToString(",") { "${it[0]}${it[1]}" } }
@@ -398,38 +399,41 @@ class HelperService : Service() {
     }
 
     /**
-     * Sucht das gerade gezogene (schwebende) Teil im Bereich unter dem Brett.
-     * Die anderen Teile der Ablage werden ausgeblendet. null = nicht (vollständig) gefunden.
+     * Sucht das gerade gezogene (schwebende) Teil zwischen oberem Brettrand und Ablage.
+     * Teil-Pixel = weicht vom Ablage-Hintergrund ab UND hat sich seit dem Greifen verändert; so fallen
+     * Brett, andere Teile und Hinweis-Balken von selbst weg. null = nicht (vollständig) gefunden.
+     * Läuft im Mess-Thread, deshalb ohne Speicher-Anlegen pro Pixel (schnell).
      */
     private fun findFloating(): RectF? {
         val cs = BS * W / 8
-        // vom oberen Brettrand bis knapp über den Markierungsbalken – Werbung darunter bleibt draußen.
-        // Hohe Teile schweben teilweise schon über dem Brett; dort hilft der Vergleich mit dem Bild vor dem Greifen.
         val top = (BY * H + 4).toInt(); val bot = (TY1 * H - 34).toInt()
         val bgTop = (BY * H + 8 * cs + 6).toInt()            // Hintergrundfarbe nur unter dem Brett bestimmen
+        val f = fb; val rf = refFb; val st = frs
+        if (st <= 0 || f.isEmpty()) return null
+        fun off(x: Int, y: Int) = y.coerceIn(0, H - 1) * st + x.coerceIn(0, W - 1) * 4
         val rs = ArrayList<Int>(); val gs = ArrayList<Int>(); val bs = ArrayList<Int>()
         for (y in bgTop until bot step 12) for (x in 4 until W - 4 step 12) {
-            val p = rgb(x, y); rs.add(p[0]); gs.add(p[1]); bs.add(p[2])
+            val o = off(x, y); if (o + 2 >= f.size) continue
+            rs.add(f[o].toInt() and 255); gs.add(f[o + 1].toInt() and 255); bs.add(f[o + 2].toInt() and 255)
         }
         if (rs.isEmpty()) return null
         rs.sort(); gs.sort(); bs.sort()
-        val bg = intArrayOf(rs[rs.size / 2], gs[gs.size / 2], bs[bs.size / 2])
+        val bgR = rs[rs.size / 2]; val bgG = gs[gs.size / 2]; val bgB = bs[bs.size / 2]
         val er = max(2, (6f * W / 1080f).roundToInt())
-        // Teil-Pixel: weicht vom Hintergrund ab UND hat sich seit dem Greifen verändert.
-        // So fallen die anderen Teile der Ablage und der Hinweis-Balken von selbst weg,
-        // auch wenn das gezogene Teil über sie hinweg bewegt wird.
-        val hasRef = refFb.size == fb.size
-        fun ref(x: Int, y: Int): IntArray {
-            val o = y.coerceIn(0, H - 1) * frs + x.coerceIn(0, W - 1) * 4
-            return intArrayOf(refFb[o].toInt() and 255, refFb[o + 1].toInt() and 255, refFb[o + 2].toInt() and 255)
-        }
+        val hasRef = rf.size == f.size
+        val md2 = MIND * MIND; val rd2 = 30 * 30
         fun on(x: Int, y: Int): Boolean {
-            val c = rgb(x, y)
-            return dist(c, bg) > MIND && (!hasRef || dist(c, ref(x, y)) > 30)
+            val o = off(x, y); if (o + 2 >= f.size) return false
+            val r = f[o].toInt() and 255; val g = f[o + 1].toInt() and 255; val b = f[o + 2].toInt() and 255
+            val dr = r - bgR; val dg = g - bgG; val db = b - bgB
+            if (dr * dr + dg * dg + db * db <= md2) return false
+            if (!hasRef) return true
+            val er2 = r - (rf[o].toInt() and 255); val eg = g - (rf[o + 1].toInt() and 255); val eb = b - (rf[o + 2].toInt() and 255)
+            return er2 * er2 + eg * eg + eb * eb > rd2
         }
         var mnX = Int.MAX_VALUE; var mnY = Int.MAX_VALUE; var mxX = -1; var mxY = -1
-        for (y in top until bot step 4) {
-            for (x in 4 until W - 4 step 4) {
+        for (y in top until bot step 5) {
+            for (x in 4 until W - 4 step 5) {
                 if (on(x, y) && on(x - er, y) && on(x + er, y) && on(x, y - er) && on(x, y + er)) {
                     mnX = min(mnX, x); mxX = max(mxX, x); mnY = min(mnY, y); mxY = max(mxY, y)
                 }
@@ -447,12 +451,22 @@ class HelperService : Service() {
         return fw in 0.45f..1.4f && fh in 0.45f..1.4f && abs(fw - fh) < 0.25f
     }
 
+    private var measureInfo = ""
+    private var lastFloat: RectF? = null              // zuletzt gefundene Fläche (fürs Fehlerbild)
+    private val worker = HandlerThread("bb-messen").apply { start() }
+    private val wh by lazy { Handler(worker.looper) }
+
     /**
      * Ziehen mit Hinsehen:
      *  1. Teil greifen und halten, bis es ruhig schwebt -> Lage messen (P0 bei Finger F0)
      *  2. Finger etwas zur Mitte (und je nach Platz hoch/runter) bewegen -> erneut messen (P1 bei F1)
      *  3. Daraus Verstärkung k und Versatz berechnen: P = P0 + k * (F - F0)
      *  4. Finger so hinbewegen, dass die Teil-Mitte genau über dem Ziel liegt, loslassen.
+     *
+     * Wichtig: Android bricht die Geste ab, wenn zwischen zwei Teilschritten eine Lücke entsteht.
+     * Deshalb wird beim Halten der nächste kurze Halteschritt sofort angehängt, und gemessen wird
+     * währenddessen im Mess-Thread. Erst wenn das Ergebnis da ist, folgt statt "weiter halten" der
+     * nächste Schritt.
      */
     private fun doDrag() {
         if (!running || paused || dragging) return
@@ -460,104 +474,137 @@ class HelperService : Service() {
         val box = grabAt ?: return
         val svc = AutoService.inst
         if (svc == null) { pauseWith("Automatik: Bedienungshilfe \"Block-Helfer Automatik\" ist nicht eingeschaltet"); return }
-        val bx = BX * W; val by = BY * H; val cs = BS * W / 8
-        val rows = m.cells.maxOf { it[0] } + 1; val cols = m.cells.maxOf { it[1] } + 1
-        val rawX = bx + (m.c + cols / 2f) * cs; val rawY = by + (m.r + rows / 2f) * cs
-        var tx = rawX; var ty = rawY
-        val sx = box.centerX(); val sy = box.centerY()
         if (refFb.size != fb.size) refFb = ByteArray(fb.size)
         System.arraycopy(fb, 0, refFb, 0, fb.size)
-        val top = BY * H
         dragging = true
         lastFloat = null
-
-        fun fail(msg: String) {
-            svc.up { h.post {
-                dragging = false; dragAt = 0
-                try { saveDebug("Auto: $msg", lastPieces, readCells(), m) } catch (_: Exception) {}
-                pauseWith("Automatik pausiert: $msg")
-            } }
-        }
-        fun lost() = h.post { dragging = false; dragFailed() }
-        fun safe(block: () -> Unit) = h.post {
-            try { block() } catch (e: Exception) { fail("Fehler: ${e.javaClass.simpleName} ${e.message ?: ""}".trim()) }
-        }
-
-        // Schritt 2: Finger seitlich zur Mitte und – nur so weit Platz ist – hoch oder runter, erneut messen.
-        // (Das Spiel bewegt das Teil um ein Vielfaches des Fingers, daher vorsichtig.)
-        fun second(p0: RectF) {
-            val bot = TY1 * H - 34
-            val roomDown = bot - p0.bottom; val roomUp = p0.top - top
-            val dxF = (if (sx < W / 2f) 0.8f else -0.8f) * cs
-            var dyF = if (roomDown > roomUp) min(roomDown * 0.3f, cs) else -min(roomUp * 0.3f, cs)
-            if (abs(dyF) < 0.15f * cs) dyF = 0f        // kein Platz: senkrecht wie waagerecht annehmen
-            val f1x = sx + dxF; val f1y = sy + dyF
-            svc.move(f1x, f1y, 200) { ok -> if (!ok) lost() else measure(svc, m.piece, rows, cols, 12, null) { p1 -> safe {
-                if (p1 == null) { fail("gezogenes Teil nicht gefunden (2) – $measureInfo"); return@safe }
-                // gelernten Fehler für diese Zugstrecke vorab ausgleichen
-                usedTravelX = (rawX - p0.centerX()) / cs; usedTravelY = (rawY - p0.centerY()) / cs
-                usedCorrX = -predict(learnX, usedTravelX); usedCorrY = -predict(learnY, usedTravelY)
-                tx = rawX + usedCorrX * cs; ty = rawY + usedCorrY * cs
-                val kx = (p1.centerX() - p0.centerX()) / dxF
-                val ky = if (dyF != 0f) (p1.centerY() - p0.centerY()) / dyF else kx
-                if (kx !in 0.5f..5f || ky !in 0.5f..5f) { fail("Zugverhalten nicht messbar (k=%.2f/%.2f)".format(kx, ky)); return@safe }
-                val fx = sx + (tx - p0.centerX()) / kx
-                val fy = sy + (ty - p0.centerY()) / ky
-                if (fx < 2 || fx > W - 2 || fy < 2 || fy > H - 2) { fail("Ziel außerhalb des Bildschirms"); return@safe }
-                svc.move(fx, fy, 450) { ok2 -> if (!ok2) lost() else svc.hold(200) { _ ->
-                    svc.up { _ -> h.post { dragging = false; dragAt = SystemClock.uptimeMillis() } }
-                } }
-            } } }
-        }
-
-        // Schritt 1: greifen und halten, bis das Teil fertig "angehoben" ist und ruhig liegt, dann messen
-        svc.down(sx, sy, 150) { ok0 ->
-            if (!ok0) lost()
-            else measure(svc, m.piece, rows, cols, 12, null) { p0 -> safe {
-                if (p0 == null) fail("gezogenes Teil nicht gefunden (1) – $measureInfo") else second(p0)
-            } }
-        }
+        DragJob(svc, m, box.centerX(), box.centerY()).start()
     }
 
-    /**
-     * Hält den Finger ruhig und misst wiederholt (alle ~100 ms), bis das schwebende Teil zweimal
-     * hintereinander ungefähr an derselben Stelle in passender Größe gefunden wird (kleines Wippen
-     * des Teils ist erlaubt). Klappt das nicht, zählt der Mittelwert der letzten passenden Messungen.
-     * null = nicht gefunden; [measureInfo] beschreibt dann, was gesehen wurde (fürs Fehlerbild).
-     */
-    private var measureInfo = ""
-    private var lastFloat: RectF? = null              // zuletzt gefundene Fläche (fürs Fehlerbild)
-
-    private fun measure(svc: AutoService, piece: Int, rows: Int, cols: Int, tries: Int, last: RectF?,
-                        good: ArrayList<RectF> = ArrayList(), done: (RectF?) -> Unit) {
+    private inner class DragJob(val svc: AutoService, val m: Solver.Move, val sx: Float, val sy: Float) {
         val cs = BS * W / 8
-        svc.hold(100) { ok -> h.post {
-            if (!ok) { measureInfo = "Geste abgebrochen"; done(null); return@post }
-            val raw = try { grab(); findFloating() } catch (e: Exception) { null }
+        val rows = m.cells.maxOf { it[0] } + 1
+        val cols = m.cells.maxOf { it[1] } + 1
+        val rawX = BX * W + (m.c + cols / 2f) * cs
+        val rawY = BY * H + (m.r + rows / 2f) * cs
+        val top = BY * H
+        val bot = TY1 * H - 34
+
+        var phase = 1                      // 1 = Messung nach dem Greifen, 2 = nach der Testbewegung
+        var next: (() -> Unit)? = null     // statt weiter zu halten als Nächstes ausführen
+        var decided = false                // Ergebnis dieser Phase steht fest
+        var busy = false                   // Messung läuft gerade im Mess-Thread
+        var ticks = 0
+        var last: RectF? = null
+        val good = ArrayList<RectF>()
+        var p0: RectF? = null
+        var dxF = 0f
+        var dyF = 0f
+
+        fun start() {
+            svc.down(sx, sy, 150) { ok -> if (!ok) h.post { dragging = false; dragFailed() } else startPhase(1) }
+        }
+
+        fun stopWith(msg: String) {
+            dragging = false; dragAt = 0
+            try { saveDebug("Auto: $msg", lastPieces, readCells(), m) } catch (_: Exception) {}
+            pauseWith("Automatik pausiert: $msg")
+        }
+
+        fun decide(action: () -> Unit) { decided = true; next = action }
+
+        fun fail(msg: String) = decide { svc.up { h.post { stopWith(msg) } } }
+
+        fun startPhase(p: Int) {
+            phase = p; decided = false; busy = false; ticks = 0; last = null; good.clear()
+            keepHolding()
+        }
+
+        /** Kurzen Halteschritt ausführen; danach sofort den nächsten anhängen oder den beschlossenen Schritt. */
+        fun keepHolding() {
+            svc.hold(90) { ok ->
+                if (!ok) { h.post { if (dragging) stopWith("Geste abgebrochen (Schritt $phase)") } }
+                else {
+                    val a = next
+                    if (a != null) { next = null; a() } else { keepHolding(); measureTick() }
+                }
+            }
+        }
+
+        /** Messung im Mess-Thread anstoßen (Hauptthread bleibt frei für die Halteschritte). */
+        fun measureTick() {
+            if (decided || busy) return
+            busy = true
+            wh.post {
+                val raw = try { grab(); findFloating() } catch (e: Exception) { null }
+                h.post {
+                    busy = false
+                    try { evaluate(raw) } catch (e: Exception) { if (!decided) fail("Fehler: ${e.javaClass.simpleName}") }
+                }
+            }
+        }
+
+        /** Eine Messung auswerten (Hauptthread). */
+        fun evaluate(raw: RectF?) {
+            if (decided || !dragging) return
+            ticks++
             val p = raw?.takeIf { plausible(it, rows, cols) }
             lastFloat = raw
             measureInfo = if (raw == null) "nichts gefunden" else
                 "Fläche %.2f x %.2f Felder (erwartet %d x %d), passend: %d".format(
                     raw.width() / cs, raw.height() / cs, cols, rows, good.size + (if (p != null) 1 else 0))
             if (p != null) {
+                val l = last
                 good.add(p)
                 val tol = cs * 0.15f
-                if (last != null && abs(p.centerX() - last.centerX()) <= tol &&
-                    abs(p.centerY() - last.centerY()) <= tol && abs(p.width() - last.width()) <= tol) {
-                    done(RectF((p.left + last.left) / 2, (p.top + last.top) / 2, (p.right + last.right) / 2, (p.bottom + last.bottom) / 2))
-                    return@post
+                if (l != null && abs(p.centerX() - l.centerX()) <= tol &&
+                    abs(p.centerY() - l.centerY()) <= tol && abs(p.width() - l.width()) <= tol) {
+                    result(RectF((p.left + l.left) / 2, (p.top + l.top) / 2, (p.right + l.right) / 2, (p.bottom + l.bottom) / 2))
+                    return
                 }
             }
-            if (tries <= 0) {
+            last = p
+            if (ticks >= 15) {
                 if (good.size >= 3) {
                     val n = good.takeLast(4)
-                    done(RectF(n.map { it.left }.average().toFloat(), n.map { it.top }.average().toFloat(),
+                    result(RectF(n.map { it.left }.average().toFloat(), n.map { it.top }.average().toFloat(),
                         n.map { it.right }.average().toFloat(), n.map { it.bottom }.average().toFloat()))
-                } else done(null)
-                return@post
+                } else fail("gezogenes Teil nicht gefunden ($phase) – $measureInfo")
             }
-            measure(svc, piece, rows, cols, tries - 1, p, good, done)
-        } }
+        }
+
+        fun result(r: RectF) {
+            if (phase == 1) {
+                p0 = r
+                val roomDown = bot - r.bottom; val roomUp = r.top - top
+                dxF = (if (sx < W / 2f) 0.8f else -0.8f) * cs
+                dyF = if (roomDown > roomUp) min(roomDown * 0.3f, cs) else -min(roomUp * 0.3f, cs)
+                if (abs(dyF) < 0.15f * cs) dyF = 0f        // kein Platz: senkrecht wie waagerecht annehmen
+                decide {
+                    svc.move(sx + dxF, sy + dyF, 200) { ok ->
+                        if (!ok) h.post { stopWith("Geste abgebrochen (Testbewegung)") } else startPhase(2)
+                    }
+                }
+                return
+            }
+            val q0 = p0!!
+            // gelernten Fehler für diese Zugstrecke vorab ausgleichen
+            usedTravelX = (rawX - q0.centerX()) / cs; usedTravelY = (rawY - q0.centerY()) / cs
+            usedCorrX = -predict(learnX, usedTravelX); usedCorrY = -predict(learnY, usedTravelY)
+            val tx = rawX + usedCorrX * cs; val ty = rawY + usedCorrY * cs
+            val kx = (r.centerX() - q0.centerX()) / dxF
+            val ky = if (dyF != 0f) (r.centerY() - q0.centerY()) / dyF else kx
+            if (kx !in 0.5f..5f || ky !in 0.5f..5f) { fail("Zugverhalten nicht messbar (k=%.2f/%.2f)".format(kx, ky)); return }
+            val fx = sx + (tx - q0.centerX()) / kx
+            val fy = sy + (ty - q0.centerY()) / ky
+            if (fx < 2 || fx > W - 2 || fy < 2 || fy > H - 2) { fail("Ziel außerhalb des Bildschirms"); return }
+            decide {
+                svc.move(fx, fy, 450) { ok ->
+                    if (!ok) h.post { stopWith("Geste abgebrochen (Zielbewegung)") }
+                    else svc.hold(200) { _ -> svc.up { _ -> h.post { dragging = false; dragAt = SystemClock.uptimeMillis() } } }
+                }
+            }
+        }
     }
 
     /** Das Teil liegt nach der Geste noch in der Ablage: nochmal versuchen, sonst pausieren. */
@@ -699,6 +746,7 @@ class HelperService : Service() {
     override fun onDestroy() {
         running = false
         h.removeCallbacks(poll)
+        worker.quitSafely()
         try { wm.removeView(btn); wm.removeView(ov) } catch (_: Exception) {}
         mp?.stop()
         super.onDestroy()
