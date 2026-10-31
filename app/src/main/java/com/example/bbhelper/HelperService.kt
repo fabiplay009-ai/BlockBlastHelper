@@ -248,7 +248,8 @@ class HelperService : Service() {
             val i = stack.removeAt(stack.size - 1)
             n++
             for (j in cells.indices) {
-                if (!seen[j] && abs(cells[i][0] - cells[j][0]) + abs(cells[i][1] - cells[j][1]) == 1) {
+                // auch über Eck: es gibt diagonale Teile (z. B. zwei Blöcke, die sich nur an der Ecke berühren)
+                if (!seen[j] && max(abs(cells[i][0] - cells[j][0]), abs(cells[i][1] - cells[j][1])) == 1) {
                     seen[j] = true; stack.add(j)
                 }
             }
@@ -453,6 +454,7 @@ class HelperService : Service() {
         val bgR = rs[rs.size / 2]; val bgG = gs[gs.size / 2]; val bgB = bs[bs.size / 2]
         val er = max(2, (6f * W / 1080f).roundToInt())
         val hasRef = rf.size == f.size
+        val boardBot = (BY * H + 8 * cs).toInt()
         val md2 = MIND * MIND; val rd2 = 30 * 30; val pd2 = 60 * 60
         // Nur Pixel in der Farbe des Teils: der dunklere "Schatten", den das Spiel an der Landestelle
         // zeichnet, zählt so nicht zum Teil (sonst wird die Fläche zu groß gemessen).
@@ -466,7 +468,14 @@ class HelperService : Service() {
                 if (pr * pr + pg * pg + pb * pb > pd2) return false
             }
             if (!hasRef) return true
-            val er2 = r - (rf[o].toInt() and 255); val eg = g - (rf[o + 1].toInt() and 255); val eb = b - (rf[o + 2].toInt() and 255)
+            val rr = rf[o].toInt() and 255; val rg = rf[o + 1].toInt() and 255; val rb = rf[o + 2].toInt() and 255
+            // Auf dem Brett: war hier vorher schon ein Block in Teilfarbe, zählt das Pixel nicht – sonst halten
+            // noch laufende Animationen gleichfarbiger Brett-Blöcke als "gezogenes Teil" her.
+            if (pc != null && y < boardBot) {
+                val qr = rr - pc[0]; val qg = rg - pc[1]; val qb = rb - pc[2]
+                if (qr * qr + qg * qg + qb * qb <= pd2) return false
+            }
+            val er2 = r - rr; val eg = g - rg; val eb = b - rb
             return er2 * er2 + eg * eg + eb * eb > rd2
         }
         var mnX = Int.MAX_VALUE; var mnY = Int.MAX_VALUE; var mxX = -1; var mxY = -1
